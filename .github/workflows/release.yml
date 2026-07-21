@@ -1,6 +1,7 @@
 name: Release desktop apps
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "app-v*"
@@ -45,6 +46,6 @@ jobs:
           tagName: app-v__VERSION__
           releaseName: "声屿 Sound Island v__VERSION__"
           releaseBody: "免费、本地优先的专业音效管理器。音频不会上传。"
-          releaseDraft: true
-          prerelease: true
+          releaseDraft: false
+          prerelease: false
           args: ${{ matrix.args }}
