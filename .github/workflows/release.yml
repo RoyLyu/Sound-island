@@ -3,8 +3,12 @@ name: Release desktop apps
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     tags:
       - "app-v*"
+    paths:
+      - ".github/release-trigger"
 
 permissions:
   contents: write
