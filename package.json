@@ -1,6 +1,6 @@
 {
   "name": "sound-island",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "private": true,
   "description": "Free, local-first sound effects library manager for film sound professionals.",
   "type": "module",

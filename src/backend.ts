@@ -1,6 +1,6 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
-import type { LibraryStats, ScanSummary, SearchRequest, Sound, SoundNameUpdate } from "./types";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import type { LibraryStats, ScanSummary, SearchRequest, Sound, SoundLabExport, SoundLabSettings, SoundNameUpdate } from "./types";
 
 declare global {
   interface Window {
@@ -58,6 +58,17 @@ export async function undoSoundDisplayName(path: string) {
 
 export async function recordSoundPlayed(path: string) {
   return invoke<void>("record_sound_played", { path });
+}
+
+export async function exportSoundLabAudio(inputPath: string, settings: SoundLabSettings) {
+  const stem = inputPath.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "") || "声屿处理音频";
+  const outputPath = await save({
+    title: "导出声音实验室处理结果",
+    defaultPath: `${stem}_声屿实验室.wav`,
+    filters: [{ name: "WAV 音频", extensions: ["wav"] }],
+  });
+  if (!outputPath) return null;
+  return invoke<SoundLabExport>("export_sound_lab_audio", { inputPath, outputPath, settings });
 }
 
 export function audioSource(path: string) {

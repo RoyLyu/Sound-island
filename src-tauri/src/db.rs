@@ -46,13 +46,25 @@ pub struct SoundRow {
 #[serde(rename_all = "camelCase")]
 pub struct SearchRequest {
     pub query: String,
+    #[serde(default)]
+    pub scope: Option<String>,
     pub category: Option<String>,
     pub subcategory: Option<String>,
     pub collection: Option<String>,
     pub favorites_only: bool,
     pub library_path: Option<String>,
+    #[serde(default)]
+    pub folder_path: Option<String>,
     pub limit: i64,
     pub offset: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryFolderRow {
+    path: String,
+    name: String,
+    sound_count: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,6 +74,7 @@ pub struct LibraryRow {
     name: String,
     sound_count: i64,
     added_at: i64,
+    child_folders: Vec<LibraryFolderRow>,
 }
 
 #[derive(Debug, Serialize)]
@@ -405,7 +418,7 @@ pub fn scan_library(db_path: &Path, root: &Path, app: &AppHandle) -> Result<Scan
     })
 }
 
-fn search_terms(query: &str) -> String {
+fn search_terms(query: &str, scope: Option<&str>) -> String {
     let synonyms: &[(&str, &[&str])] = &[
         ("雨", &["rain", "storm", "wet"]),
         ("脚步", &["footstep", "steps", "boots"]),
@@ -437,11 +450,35 @@ fn search_terms(query: &str) -> String {
     }
     terms.sort();
     terms.dedup();
+    let columns: &[&str] = match scope {
+        Some("name") => &["name"],
+        Some("category") => &["category", "subcategory"],
+        Some("tags") => &["tags"],
+        Some("path") => &["path"],
+        _ => &[],
+    };
     terms
         .into_iter()
-        .map(|term| format!("\"{}\"*", term.replace('"', "")))
+        .flat_map(|term| {
+            let term = term.replace('"', "");
+            if columns.is_empty() {
+                vec![format!("\"{term}\"*")]
+            } else {
+                columns
+                    .iter()
+                    .map(|column| format!("{column}:\"{term}\"*"))
+                    .collect()
+            }
+        })
         .collect::<Vec<_>>()
         .join(" OR ")
+}
+
+fn escape_like(value: &str) -> String {
+    value
+        .replace('!', "!!")
+        .replace('%', "!%")
+        .replace('_', "!_")
 }
 
 fn sound_from_row(row: &Row<'_>) -> rusqlite::Result<SoundRow> {
@@ -471,7 +508,8 @@ fn sound_from_row(row: &Row<'_>) -> rusqlite::Result<SoundRow> {
 
 pub fn search_sounds(db_path: &Path, request: SearchRequest) -> Result<Vec<SoundRow>> {
     let connection = open_db(db_path)?;
-    let fts_query = search_terms(&request.query);
+    let scope = request.scope.as_deref();
+    let fts_query = search_terms(&request.query, scope);
     let has_query = !fts_query.is_empty();
     let mut sql = String::from(
         "SELECT s.path, s.name, s.display_name, s.previous_display_name, s.extension, s.file_size, s.modified_at, s.category, s.subcategory, s.tags, s.library_path, l.name, s.favorite, s.duration, s.sample_rate, s.channels, s.bit_depth, s.last_played_at, s.play_count FROM sounds s JOIN libraries l ON l.path=s.library_path "
@@ -479,9 +517,13 @@ pub fn search_sounds(db_path: &Path, request: SearchRequest) -> Result<Vec<Sound
     sql.push_str("WHERE 1=1 ");
     let mut values: Vec<Value> = Vec::new();
     if has_query {
-        sql.push_str("AND (s.rowid IN (SELECT rowid FROM sounds_fts WHERE sounds_fts MATCH ?) OR COALESCE(s.display_name,'') LIKE ?) ");
+        sql.push_str("AND (s.rowid IN (SELECT rowid FROM sounds_fts WHERE sounds_fts MATCH ?) ");
         values.push(fts_query.into());
-        values.push(format!("%{}%", request.query.trim()).into());
+        if matches!(scope, None | Some("all") | Some("name")) {
+            sql.push_str("OR COALESCE(s.display_name,'') LIKE ? ");
+            values.push(format!("%{}%", request.query.trim()).into());
+        }
+        sql.push_str(") ");
     }
     if let Some(category) = request.category.filter(|value| !value.is_empty()) {
         sql.push_str("AND s.category=? ");
@@ -497,6 +539,17 @@ pub fn search_sounds(db_path: &Path, request: SearchRequest) -> Result<Vec<Sound
     if let Some(library_path) = request.library_path.filter(|value| !value.is_empty()) {
         sql.push_str("AND s.library_path=? ");
         values.push(library_path.into());
+    }
+    if let Some(folder_path) = request.folder_path.filter(|value| !value.is_empty()) {
+        sql.push_str("AND s.path LIKE ? ESCAPE '!' ");
+        values.push(
+            format!(
+                "{}{}%",
+                escape_like(&folder_path),
+                std::path::MAIN_SEPARATOR
+            )
+            .into(),
+        );
     }
     match request.collection.as_deref() {
         Some("recently_played") => sql.push_str("AND s.last_played_at IS NOT NULL "),
@@ -564,16 +617,49 @@ pub fn get_stats(db_path: &Path) -> Result<LibraryStats> {
     let mut library_statement = connection.prepare(
         "SELECT l.path, l.name, COUNT(s.path), l.added_at FROM libraries l LEFT JOIN sounds s ON s.library_path=l.path GROUP BY l.path ORDER BY l.added_at DESC"
     )?;
-    let libraries = library_statement
+    let mut libraries = library_statement
         .query_map([], |row| {
             Ok(LibraryRow {
                 path: row.get(0)?,
                 name: row.get(1)?,
                 sound_count: row.get(2)?,
                 added_at: row.get(3)?,
+                child_folders: Vec::new(),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(library_statement);
+    for library in &mut libraries {
+        let root = Path::new(&library.path);
+        let mut folders = std::collections::BTreeMap::<String, (String, i64)>::new();
+        let mut statement = connection.prepare("SELECT path FROM sounds WHERE library_path=?1")?;
+        let rows = statement.query_map(params![library.path], |row| row.get::<_, String>(0))?;
+        for sound_path in rows {
+            let sound_path = PathBuf::from(sound_path?);
+            let Ok(relative) = sound_path.strip_prefix(root) else {
+                continue;
+            };
+            let mut components = relative.components();
+            let Some(first) = components.next() else {
+                continue;
+            };
+            if components.next().is_none() {
+                continue;
+            }
+            let name = first.as_os_str().to_string_lossy().into_owned();
+            let child_path = root.join(first.as_os_str()).to_string_lossy().into_owned();
+            let entry = folders.entry(name).or_insert((child_path, 0));
+            entry.1 += 1;
+        }
+        library.child_folders = folders
+            .into_iter()
+            .map(|(name, (path, sound_count))| LibraryFolderRow {
+                path,
+                name,
+                sound_count,
+            })
+            .collect();
+    }
     Ok(LibraryStats {
         total,
         total_bytes,
@@ -664,13 +750,20 @@ pub fn remove_library(db_path: &Path, path: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_DB_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     fn test_db() -> PathBuf {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("sound-island-{suffix}.db"));
+        let sequence = TEST_DB_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "sound-island-{}-{suffix}-{sequence}.db",
+            std::process::id()
+        ));
         init_db(&path).unwrap();
         let connection = open_db(&path).unwrap();
         connection
@@ -718,5 +811,75 @@ mod tests {
     fn ignores_macos_resource_fork_audio_files() {
         assert!(!supported_audio(Path::new("._hidden.wav")));
         assert!(supported_audio(Path::new("visible.wav")));
+    }
+
+    #[test]
+    fn exposes_immediate_library_folders_and_filters_by_folder() {
+        let path = test_db();
+        let connection = open_db(&path).unwrap();
+        connection.execute(
+            "INSERT INTO sounds(path,name,extension,file_size,modified_at,category,subcategory,tags,library_path,last_seen_scan) VALUES('/test/Doors/open.wav','open','wav',1,1,'硬音效 Hard FX','门窗 / Doors','[]','/test',1)",
+            [],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO sounds(path,name,extension,file_size,modified_at,category,subcategory,tags,library_path,last_seen_scan) VALUES('/test/Doors/Metal/close.wav','close','wav',1,1,'硬音效 Hard FX','门窗 / Doors','[]','/test',1)",
+            [],
+        ).unwrap();
+        drop(connection);
+
+        let stats = get_stats(&path).unwrap();
+        assert_eq!(stats.libraries[0].child_folders.len(), 1);
+        assert_eq!(stats.libraries[0].child_folders[0].name, "Doors");
+        assert_eq!(stats.libraries[0].child_folders[0].sound_count, 2);
+
+        let results = search_sounds(
+            &path,
+            SearchRequest {
+                query: String::new(),
+                scope: Some("all".into()),
+                category: None,
+                subcategory: None,
+                collection: None,
+                favorites_only: false,
+                library_path: Some("/test".into()),
+                folder_path: Some("/test/Doors".into()),
+                limit: 20,
+                offset: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(results.len(), 2);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn scopes_search_to_name_or_category() {
+        let path = test_db();
+        let request = |query: &str, scope: &str| SearchRequest {
+            query: query.into(),
+            scope: Some(scope.into()),
+            category: None,
+            subcategory: None,
+            collection: None,
+            favorites_only: false,
+            library_path: None,
+            folder_path: None,
+            limit: 20,
+            offset: 0,
+        };
+        assert_eq!(
+            search_sounds(&path, request("body", "name")).unwrap().len(),
+            1
+        );
+        assert!(search_sounds(&path, request("falls", "category"))
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            search_sounds(&path, request("身体", "category"))
+                .unwrap()
+                .len(),
+            1
+        );
+        let _ = std::fs::remove_file(path);
     }
 }

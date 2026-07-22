@@ -1,9 +1,11 @@
 mod classify;
 mod db;
+mod sound_lab;
 mod translation;
 mod waveform;
 
 use db::{AppState, LibraryStats, ScanSummary, SearchRequest, SoundNameUpdate, SoundRow};
+use sound_lab::{SoundLabExport, SoundLabSettings};
 use std::path::PathBuf;
 use tauri::{Manager, State};
 
@@ -132,6 +134,24 @@ async fn reveal_in_file_manager(path: String) -> Result<(), String> {
     tauri_plugin_opener::reveal_item_in_dir(path).map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+async fn export_sound_lab_audio(
+    input_path: String,
+    output_path: String,
+    settings: SoundLabSettings,
+) -> Result<SoundLabExport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        sound_lab::export(
+            std::path::Path::new(&input_path),
+            std::path::Path::new(&output_path),
+            settings,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -158,7 +178,8 @@ pub fn run() {
             undo_sound_display_name,
             record_sound_played,
             remove_library,
-            reveal_in_file_manager
+            reveal_in_file_manager,
+            export_sound_lab_audio
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Sound Island");

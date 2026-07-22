@@ -17,6 +17,7 @@ import {
   undoSoundDisplayName,
 } from "./backend";
 import type { LibraryStats, ScanProgress, Sound, SoundNameUpdate } from "./types";
+import { SoundLab } from "./SoundLab";
 import { Waveform } from "./Waveform";
 
 const categories = [
@@ -27,9 +28,6 @@ const categories = [
 
 const smartCollections = [
   ["recently_played", "最近播放", "↺"],
-  ["short", "短音效 · 10s 内", "⚡"],
-  ["high_res", "高解析度 · 96k+", "⌁"],
-  ["needs_translation", "待生成中文名", "译"],
 ] as const;
 
 const quickFilters = ["雨声", "脚步声", "摩擦声", "撞击声", "门窗", "车辆", "呼啸转场", "人群"];
@@ -65,6 +63,8 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
     next: <><path d="m7 6 8 6-8 6Z"/><path d="M17 6v12"/></>,
     loop: <><path d="M17 2l4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/></>,
     similar: <><circle cx="10" cy="10" r="5"/><path d="m14 14 6 6M3 10H1M10 3V1M17 10h2M10 17v2"/></>,
+    lab: <><path d="M9 3v5l-4.5 8a3 3 0 0 0 2.6 4.5h9.8a3 3 0 0 0 2.6-4.5L15 8V3"/><path d="M8 13h8M8 3h8"/><circle cx="12" cy="17" r="1"/></>,
+    chevron: <path d="m8 10 4 4 4-4"/>,
   };
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
@@ -101,10 +101,14 @@ export default function App() {
   const [sounds, setSounds] = useState<Sound[]>([]);
   const [selected, setSelected] = useState<Sound | null>(null);
   const [query, setQuery] = useState("");
+  const [searchScope, setSearchScope] = useState<"all" | "name" | "category" | "tags" | "path">("all");
   const [activeCategory, setActiveCategory] = useState("全部声音");
   const [activeSubcategory, setActiveSubcategory] = useState<string | null>(null);
+  const [expandedCategory, setExpandedCategory] = useState<string | null>(null);
   const [activeCollection, setActiveCollection] = useState<string | null>(null);
   const [activeLibrary, setActiveLibrary] = useState<string | null>(null);
+  const [activeFolder, setActiveFolder] = useState<string | null>(null);
+  const [expandedLibrary, setExpandedLibrary] = useState<string | null>(null);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [loading, setLoading] = useState(false);
   const [scanning, setScanning] = useState<ScanProgress | null>(null);
@@ -119,6 +123,7 @@ export default function App() {
   const [waveformLoading, setWaveformLoading] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   const [translating, setTranslating] = useState(false);
+  const [soundLabOpen, setSoundLabOpen] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const toastTimer = useRef<number | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
@@ -148,11 +153,13 @@ export default function App() {
     try {
       const result = await searchSounds({
         query,
+        scope: searchScope,
         category: activeCategory === "全部声音" ? null : activeCategory,
         subcategory: activeSubcategory,
         collection: activeCollection,
         favoritesOnly,
         libraryPath: activeLibrary,
+        folderPath: activeFolder,
         limit: 500,
         offset: 0,
       });
@@ -163,7 +170,7 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [desktop, query, activeCategory, activeSubcategory, activeCollection, favoritesOnly, activeLibrary, showToast]);
+  }, [desktop, query, searchScope, activeCategory, activeSubcategory, activeCollection, favoritesOnly, activeLibrary, activeFolder, showToast]);
 
   useEffect(() => { void refreshStats(); }, [refreshStats]);
   useEffect(() => {
@@ -263,16 +270,18 @@ export default function App() {
     const list = soundsRef.current;
     if (!list.length) return;
     const currentIndex = Math.max(0, list.findIndex((sound) => sound.path === selectedRef.current?.path));
-    const next = list[Math.max(0, Math.min(list.length - 1, currentIndex + step))];
+    const nextIndex = Math.max(0, Math.min(list.length - 1, currentIndex + step));
+    const next = list[nextIndex];
     if (!next || next.path === selectedRef.current?.path) return;
     selectSound(next);
+    window.requestAnimationFrame(() => document.querySelector(`[data-sound-index="${nextIndex}"]`)?.scrollIntoView({ block: "nearest" }));
     if (shouldPlay) void togglePlay(next, true);
   }, [selectSound, togglePlay]);
   playRelativeRef.current = playRelative;
 
   keyboardHandlerRef.current = (event) => {
     const target = event.target as HTMLElement | null;
-    const isEditing = target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.isContentEditable;
+    const isEditing = target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.tagName === "SELECT" || target?.isContentEditable;
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
       searchInputRef.current?.focus();
@@ -280,13 +289,14 @@ export default function App() {
       return;
     }
     if (isEditing) return;
+    if (soundLabOpen) return;
     if (event.code === "Space") {
       event.preventDefault();
       void togglePlay();
-    } else if (event.key === "ArrowDown") {
+    } else if (event.key === "ArrowDown" || event.code === "KeyS") {
       event.preventDefault();
       playRelative(1);
-    } else if (event.key === "ArrowUp") {
+    } else if (event.key === "ArrowUp" || event.code === "KeyW") {
       event.preventDefault();
       playRelative(-1);
     }
@@ -338,6 +348,8 @@ export default function App() {
     if (!window.confirm("只从声屿索引中移除此素材库？原始音频文件不会被删除。")) return;
     await removeLibrary(path);
     if (activeLibrary === path) setActiveLibrary(null);
+    if (expandedLibrary === path) setExpandedLibrary(null);
+    if (activeFolder?.startsWith(path)) setActiveFolder(null);
     await Promise.all([refreshStats(), refreshSounds()]);
     showToast("已移除索引，原始音频未作任何改动");
   };
@@ -385,7 +397,9 @@ export default function App() {
     const sound = selectedRef.current;
     if (!sound) return;
     setQuery("");
+    setSearchScope("all");
     setActiveLibrary(null);
+    setActiveFolder(null);
     setFavoritesOnly(false);
     setActiveCollection(null);
     setActiveCategory(sound.category);
@@ -408,9 +422,9 @@ export default function App() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div className="brand"><div className="brand-mark"><i/><i/><i/><i/><i/></div><div><strong>声屿</strong><small>SOUND ISLAND · 0.2</small></div></div>
-        <label className="search-box"><Icon name="search" size={17}/><input ref={searchInputRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索原名、中文显示名、分类、标签或路径…"/>{query ? <button onClick={() => setQuery("")} aria-label="清空"><Icon name="close" size={14}/></button> : null}<kbd>⌘ K</kbd></label>
-        <div className="status-area"><div className="privacy-pill"><i className={desktop ? "online" : "offline"}/><span><strong>{desktop ? "本地智能在线" : "界面预览"}</strong><small>{stats.total.toLocaleString()} 个音频 · 零上传</small></span></div><button className="add-top" onClick={addLibrary}><Icon name="plus" size={16}/>添加素材库</button></div>
+        <div className="brand"><div className="brand-mark"><i/><i/><i/><i/><i/></div><div><strong>声屿</strong><small>SOUND ISLAND · 0.3</small></div></div>
+        <label className="search-box"><Icon name="search" size={18}/><select aria-label="搜索范围" value={searchScope} onChange={(event) => setSearchScope(event.target.value as typeof searchScope)}><option value="all">全库</option><option value="name">名称</option><option value="category">分类</option><option value="tags">标签</option><option value="path">路径</option></select><i className="search-divider"/><input ref={searchInputRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="输入中文或英文，搜索原名、显示名、分类、标签与路径…"/>{query ? <button onClick={() => setQuery("")} aria-label="清空"><Icon name="close" size={14}/></button> : null}<span className="search-engine">FTS5</span><kbd>⌘ K</kbd></label>
+        <div className="status-area"><button className="lab-top" disabled={!selected} onClick={() => { stopAudio(); setSoundLabOpen(true); }} title={selected ? "将当前选中声音送入声音实验室" : "请先选择一个声音"}><Icon name="lab" size={16}/>声音实验室</button><div className="privacy-pill"><i className={desktop ? "online" : "offline"}/><span><strong>{desktop ? "本地智能在线" : "界面预览"}</strong><small>{stats.total.toLocaleString()} 个音频 · 零上传</small></span></div><button className="add-top" onClick={addLibrary}><Icon name="plus" size={16}/>添加素材库</button></div>
       </header>
 
       <aside className="sidebar">
@@ -421,22 +435,22 @@ export default function App() {
         </nav>
         <nav className="nav-section category-nav">
           <label><span>智能分类</span><em>{Object.keys(stats.categories).length}</em></label>
-          {categories.map(([label, glyph]) => <div className="category-group" key={label}><button className={!favoritesOnly && !activeCollection && activeCategory === label && !activeSubcategory ? "active" : ""} onClick={() => { setFavoritesOnly(false); setActiveCollection(null); setActiveCategory(label); setActiveSubcategory(null); }}><span className="glyph">{glyph}</span><span>{label}</span><em>{(label === "全部声音" ? stats.total : stats.categories[label] ?? 0).toLocaleString()}</em></button>{activeCategory === label && label !== "全部声音" && !activeCollection ? <div className="subcategory-list">{Object.entries(stats.subcategories[label] ?? {}).map(([subcategory, count]) => <button key={subcategory} className={activeSubcategory === subcategory ? "active" : ""} onClick={() => setActiveSubcategory(activeSubcategory === subcategory ? null : subcategory)}><span>{subcategory.split(" / ")[0]}</span><em>{count.toLocaleString()}</em></button>)}</div> : null}</div>)}
+          {categories.map(([label, glyph]) => <div className="category-group" key={label}><button className={!favoritesOnly && !activeCollection && activeCategory === label && !activeSubcategory ? "active" : ""} aria-expanded={label === "全部声音" ? undefined : expandedCategory === label} onClick={() => { setFavoritesOnly(false); setActiveCollection(null); setActiveCategory(label); setActiveSubcategory(null); setExpandedCategory((current) => label === "全部声音" ? null : current === label ? null : label); }}><span className="glyph">{glyph}</span><span>{label}</span><span className="nav-count"><em>{(label === "全部声音" ? stats.total : stats.categories[label] ?? 0).toLocaleString()}</em>{label !== "全部声音" ? <i className={expandedCategory === label ? "expanded" : ""}><Icon name="chevron" size={11}/></i> : null}</span></button>{expandedCategory === label && label !== "全部声音" ? <div className="subcategory-list">{Object.entries(stats.subcategories[label] ?? {}).map(([subcategory, count]) => <button key={subcategory} className={activeSubcategory === subcategory ? "active" : ""} onClick={() => setActiveSubcategory(activeSubcategory === subcategory ? null : subcategory)}><span>{subcategory.split(" / ")[0]}</span><em>{count.toLocaleString()}</em></button>)}</div> : null}</div>)}
         </nav>
         <nav className="library-section">
           <label>本地素材库</label>
-          {stats.libraries.map((library) => <div className={`library-item ${activeLibrary === library.path ? "active" : ""}`} key={library.path}><button className="library-name" onClick={() => setActiveLibrary(activeLibrary === library.path ? null : library.path)} title={library.path}><i/><span><strong>{library.name}</strong><small>{library.soundCount.toLocaleString()} 个文件</small></span></button><button className="mini-action" onClick={() => void rescan(library.path)} title="重新扫描"><Icon name="refresh" size={13}/></button><button className="mini-action danger" onClick={() => void removeLibraryFromIndex(library.path)} title="从索引移除"><Icon name="trash" size={13}/></button></div>)}
+          {stats.libraries.map((library) => <div className="library-group" key={library.path}><div className={`library-item ${activeLibrary === library.path && !activeFolder ? "active" : ""}`}><button className="library-name" aria-expanded={expandedLibrary === library.path} onClick={() => { const closing = expandedLibrary === library.path; setExpandedLibrary(closing ? null : library.path); setActiveLibrary(closing ? null : library.path); setActiveFolder(null); }} title={library.path}><i/><span><strong>{library.name}</strong><small>{library.soundCount.toLocaleString()} 个文件 · {library.childFolders.length} 个子文件夹</small></span><b className={expandedLibrary === library.path ? "expanded" : ""}><Icon name="chevron" size={11}/></b></button><button className="mini-action" onClick={() => void rescan(library.path)} title="重新扫描"><Icon name="refresh" size={13}/></button><button className="mini-action danger" onClick={() => void removeLibraryFromIndex(library.path)} title="从索引移除"><Icon name="trash" size={13}/></button></div>{expandedLibrary === library.path ? <div className="library-children">{library.childFolders.length ? library.childFolders.map((folder) => <button key={folder.path} className={activeFolder === folder.path ? "active" : ""} onClick={() => { setActiveLibrary(library.path); setActiveFolder(activeFolder === folder.path ? null : folder.path); }} title={folder.path}><span><Icon name="folder" size={12}/>{folder.name}</span><em>{folder.soundCount.toLocaleString()}</em></button>) : <p>母文件夹下没有可索引的直属子文件夹</p>}</div> : null}</div>)}
           {!stats.libraries.length ? <p className="sidebar-empty">还没有添加任何素材库</p> : null}
         </nav>
       </aside>
 
       <section className="workspace">
         {!desktop ? <div className="preview-notice"><Icon name="info" size={15}/><span>界面预览模式：桌面版会读取真实 SQLite 索引与本地波形。</span></div> : null}
-        <div className="workspace-head"><div><span className="eyebrow">声景视图</span><strong>{activeTitle}</strong><span>{activeLibrary ? stats.libraries.find((item) => item.path === activeLibrary)?.name : "全部素材库"}</span></div><p><strong>{sounds.length.toLocaleString()}</strong> 条结果{stats.total > 500 ? " · 显示前 500 条" : ""}</p></div>
-        <div className="filter-strip"><span className="filter-label"><Icon name="spark" size={13}/>声音速查</span><div className="quick-filter-list">{quickFilters.map((term) => <button key={term} className={query === term ? "active" : ""} onClick={() => setQuery(query === term ? "" : term)}>{term}</button>)}</div><span className="key-hint"><kbd>↑↓</kbd> 选择 <kbd>Space</kbd> 试听</span></div>
+        <div className="workspace-head"><div><span className="eyebrow">声景视图</span><strong>{activeTitle}</strong><span>{activeFolder ? activeFolder.split(/[\\/]/).pop() : activeLibrary ? stats.libraries.find((item) => item.path === activeLibrary)?.name : "全部素材库"}</span></div><p><strong>{sounds.length.toLocaleString()}</strong> 条结果{stats.total > 500 ? " · 显示前 500 条" : ""}</p></div>
+        <div className="filter-strip"><span className="filter-label"><Icon name="spark" size={13}/>声音速查</span><div className="quick-filter-list">{quickFilters.map((term) => <button key={term} className={query === term ? "active" : ""} onClick={() => { setSearchScope("all"); setQuery(query === term ? "" : term); }}>{term}</button>)}</div><span className="key-hint"><kbd>W/S</kbd> 或 <kbd>↑↓</kbd> 选择 <kbd>Space</kbd> 试听</span></div>
         <div className="table-head"><span>声音</span><span>智能分类</span><span>时长</span><span>规格</span><span>素材库</span><span/></div>
         <div className={`sound-list ${loading ? "loading" : ""}`}>
-          {sounds.map((sound) => <article key={sound.path} className={`${selected?.path === sound.path ? "selected" : ""} ${playing && selected?.path === sound.path ? "is-playing" : ""}`} onClick={() => selectSound(sound)} onDoubleClick={() => void togglePlay(sound)}>
+          {sounds.map((sound, index) => <article key={sound.path} data-sound-index={index} className={`${selected?.path === sound.path ? "selected" : ""} ${playing && selected?.path === sound.path ? "is-playing" : ""}`} onClick={() => selectSound(sound)} onDoubleClick={() => void togglePlay(sound)}>
             <div className="sound-name"><button className={sound.favorite ? "favorite active" : "favorite"} onClick={(event) => { event.stopPropagation(); void toggleFavorite(sound); }} aria-label="收藏"><Icon name="heart" size={14}/></button><span><strong>{soundTitle(sound)}</strong>{sound.displayName ? <small className="original-name">原名 · {sound.name}</small> : <small title={sound.path}>{sound.path}</small>}</span>{sound.displayName ? <b className="translated-badge">中</b> : null}</div>
             <div className="category-cell"><strong>{sound.category}</strong><small>{sound.subcategory}</small></div>
             <span className="mono">{formatTime(sound.duration)}</span>
@@ -469,6 +483,7 @@ export default function App() {
         <div className="transport-tools"><button className={autoAdvance ? "active" : ""} onClick={() => { setAutoAdvance((value) => !value); setLoopPlayback(false); }} title="播放结束后自动试听下一条"><Icon name="next" size={15}/>连播</button><button className={loopPlayback ? "active" : ""} onClick={() => { setLoopPlayback((value) => !value); setAutoAdvance(false); }} title="循环当前声音"><Icon name="loop" size={14}/>循环</button><button className={pitchSemitones ? "active pitch-button" : "pitch-button"} onClick={cyclePitch} title="切换原速、降六半音、升六半音">音高 {pitchSemitones === 0 ? "原速" : `${pitchSemitones > 0 ? "+" : ""}${pitchSemitones}`}</button><kbd>SPACE</kbd><div className="volume"><Icon name="volume" size={17}/><input aria-label="音量" type="range" min="0" max="1" step="0.01" value={volume} onChange={(event) => setVolume(Number(event.target.value))}/></div></div>
       </section>
 
+      {soundLabOpen && selected ? <SoundLab sound={selected} peaks={waveform} onClose={() => setSoundLabOpen(false)} onNotice={showToast}/> : null}
       {scanning ? <div className="scan-overlay"><div className="scan-dialog"><div className="spinner"/><strong>正在建立本地智能索引</strong><p>{scanning.currentFile || "分析文件名与音频规格…"}</p><div className="scan-progress"><span style={{ width: scanning.discovered ? `${Math.min(100, scanning.processed / scanning.discovered * 100)}%` : "12%" }}/></div><small>已处理 {scanning.processed.toLocaleString()} / {scanning.discovered.toLocaleString()} · 音频不会上传</small></div></div> : null}
       {toast ? <div className="toast"><i>✓</i>{toast}</div> : null}
     </main>
