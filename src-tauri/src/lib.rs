@@ -67,7 +67,10 @@ async fn get_waveform(path: String, bins: usize) -> Result<Vec<f32>, String> {
 }
 
 #[tauri::command]
-async fn translate_sound_name(state: State<'_, AppState>, path: String) -> Result<SoundNameUpdate, String> {
+async fn translate_sound_name(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<SoundNameUpdate, String> {
     let db_path = state.db_path.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let original = db::original_sound_name(&db_path, &path)?;
@@ -86,14 +89,19 @@ async fn set_sound_display_name(
     display_name: Option<String>,
 ) -> Result<SoundNameUpdate, String> {
     let db_path = state.db_path.clone();
-    tauri::async_runtime::spawn_blocking(move || db::set_sound_display_name(&db_path, &path, display_name.as_deref()))
-        .await
-        .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        db::set_sound_display_name(&db_path, &path, display_name.as_deref())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-async fn undo_sound_display_name(state: State<'_, AppState>, path: String) -> Result<SoundNameUpdate, String> {
+async fn undo_sound_display_name(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<SoundNameUpdate, String> {
     let db_path = state.db_path.clone();
     tauri::async_runtime::spawn_blocking(move || db::undo_sound_display_name(&db_path, &path))
         .await
