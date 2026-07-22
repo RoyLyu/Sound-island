@@ -26,6 +26,8 @@ pub struct AppState {
 pub struct SoundRow {
     path: String,
     name: String,
+    display_name: Option<String>,
+    can_undo_name: bool,
     extension: String,
     file_size: i64,
     modified_at: i64,
@@ -39,6 +41,8 @@ pub struct SoundRow {
     sample_rate: Option<i64>,
     channels: Option<i64>,
     bit_depth: Option<i64>,
+    last_played_at: Option<i64>,
+    play_count: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,6 +50,8 @@ pub struct SoundRow {
 pub struct SearchRequest {
     pub query: String,
     pub category: Option<String>,
+    pub subcategory: Option<String>,
+    pub collection: Option<String>,
     pub favorites_only: bool,
     pub library_path: Option<String>,
     pub limit: i64,
@@ -68,7 +74,16 @@ pub struct LibraryStats {
     total_bytes: i64,
     favorites: i64,
     categories: std::collections::BTreeMap<String, i64>,
+    subcategories: std::collections::BTreeMap<String, std::collections::BTreeMap<String, i64>>,
+    smart_collections: std::collections::BTreeMap<String, i64>,
     libraries: Vec<LibraryRow>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundNameUpdate {
+    display_name: Option<String>,
+    can_undo_name: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -119,6 +134,8 @@ pub fn init_db(path: &Path) -> Result<()> {
         CREATE TABLE IF NOT EXISTS sounds (
           path TEXT PRIMARY KEY,
           name TEXT NOT NULL,
+          display_name TEXT,
+          previous_display_name TEXT,
           extension TEXT NOT NULL,
           file_size INTEGER NOT NULL,
           modified_at INTEGER NOT NULL,
@@ -131,6 +148,8 @@ pub fn init_db(path: &Path) -> Result<()> {
           sample_rate INTEGER,
           channels INTEGER,
           bit_depth INTEGER,
+          last_played_at INTEGER,
+          play_count INTEGER NOT NULL DEFAULT 0,
           last_seen_scan INTEGER NOT NULL DEFAULT 0
         );
 
@@ -160,6 +179,22 @@ pub fn init_db(path: &Path) -> Result<()> {
         END;
         "#,
     )?;
+    ensure_sound_column(&connection, "display_name", "TEXT")?;
+    ensure_sound_column(&connection, "previous_display_name", "TEXT")?;
+    ensure_sound_column(&connection, "last_played_at", "INTEGER")?;
+    ensure_sound_column(&connection, "play_count", "INTEGER NOT NULL DEFAULT 0")?;
+    connection.execute("DELETE FROM sounds WHERE name LIKE '._%'", [])?;
+    Ok(())
+}
+
+fn ensure_sound_column(connection: &Connection, name: &str, definition: &str) -> Result<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(sounds)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !columns.iter().any(|column| column == name) {
+        connection.execute_batch(&format!("ALTER TABLE sounds ADD COLUMN {name} {definition}"))?;
+    }
     Ok(())
 }
 
@@ -178,6 +213,9 @@ pub fn library_paths(path: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn supported_audio(path: &Path) -> bool {
+    if path.file_name().and_then(|value| value.to_str()).is_some_and(|name| name.starts_with("._")) {
+        return false;
+    }
     matches!(
         path.extension().and_then(|value| value.to_str()).map(|value| value.to_ascii_lowercase()).as_deref(),
         Some("wav" | "wave" | "aif" | "aiff" | "flac" | "mp3" | "m4a" | "ogg")
@@ -353,23 +391,27 @@ fn search_terms(query: &str) -> String {
 }
 
 fn sound_from_row(row: &Row<'_>) -> rusqlite::Result<SoundRow> {
-    let tags_json: String = row.get(7)?;
+    let tags_json: String = row.get(9)?;
     Ok(SoundRow {
         path: row.get(0)?,
         name: row.get(1)?,
-        extension: row.get(2)?,
-        file_size: row.get(3)?,
-        modified_at: row.get(4)?,
-        category: row.get(5)?,
-        subcategory: row.get(6)?,
+        display_name: row.get(2)?,
+        can_undo_name: row.get::<_, Option<String>>(3)?.is_some(),
+        extension: row.get(4)?,
+        file_size: row.get(5)?,
+        modified_at: row.get(6)?,
+        category: row.get(7)?,
+        subcategory: row.get(8)?,
         tags: serde_json::from_str(&tags_json).unwrap_or_default(),
-        library_path: row.get(8)?,
-        library_name: row.get(9)?,
-        favorite: row.get::<_, i64>(10)? != 0,
-        duration: row.get(11)?,
-        sample_rate: row.get(12)?,
-        channels: row.get(13)?,
-        bit_depth: row.get(14)?,
+        library_path: row.get(10)?,
+        library_name: row.get(11)?,
+        favorite: row.get::<_, i64>(12)? != 0,
+        duration: row.get(13)?,
+        sample_rate: row.get(14)?,
+        channels: row.get(15)?,
+        bit_depth: row.get(16)?,
+        last_played_at: row.get(17)?,
+        play_count: row.get(18)?,
     })
 }
 
@@ -378,16 +420,31 @@ pub fn search_sounds(db_path: &Path, request: SearchRequest) -> Result<Vec<Sound
     let fts_query = search_terms(&request.query);
     let has_query = !fts_query.is_empty();
     let mut sql = String::from(
-        "SELECT s.path, s.name, s.extension, s.file_size, s.modified_at, s.category, s.subcategory, s.tags, s.library_path, l.name, s.favorite, s.duration, s.sample_rate, s.channels, s.bit_depth FROM sounds s JOIN libraries l ON l.path=s.library_path "
+        "SELECT s.path, s.name, s.display_name, s.previous_display_name, s.extension, s.file_size, s.modified_at, s.category, s.subcategory, s.tags, s.library_path, l.name, s.favorite, s.duration, s.sample_rate, s.channels, s.bit_depth, s.last_played_at, s.play_count FROM sounds s JOIN libraries l ON l.path=s.library_path "
     );
-    if has_query { sql.push_str("JOIN sounds_fts ON sounds_fts.rowid=s.rowid "); }
     sql.push_str("WHERE 1=1 ");
     let mut values: Vec<Value> = Vec::new();
-    if has_query { sql.push_str("AND sounds_fts MATCH ? "); values.push(fts_query.into()); }
+    if has_query {
+        sql.push_str("AND (s.rowid IN (SELECT rowid FROM sounds_fts WHERE sounds_fts MATCH ?) OR COALESCE(s.display_name,'') LIKE ?) ");
+        values.push(fts_query.into());
+        values.push(format!("%{}%", request.query.trim()).into());
+    }
     if let Some(category) = request.category.filter(|value| !value.is_empty()) { sql.push_str("AND s.category=? "); values.push(category.into()); }
+    if let Some(subcategory) = request.subcategory.filter(|value| !value.is_empty()) { sql.push_str("AND s.subcategory=? "); values.push(subcategory.into()); }
     if request.favorites_only { sql.push_str("AND s.favorite=1 "); }
     if let Some(library_path) = request.library_path.filter(|value| !value.is_empty()) { sql.push_str("AND s.library_path=? "); values.push(library_path.into()); }
-    sql.push_str(if has_query { "ORDER BY bm25(sounds_fts), s.name COLLATE NOCASE " } else { "ORDER BY s.name COLLATE NOCASE " });
+    match request.collection.as_deref() {
+        Some("recently_played") => sql.push_str("AND s.last_played_at IS NOT NULL "),
+        Some("short") => sql.push_str("AND s.duration IS NOT NULL AND s.duration<=10 "),
+        Some("high_res") => sql.push_str("AND s.sample_rate>=96000 "),
+        Some("needs_translation") => sql.push_str("AND (s.display_name IS NULL OR s.display_name='') AND s.name GLOB '*[A-Za-z]*' "),
+        _ => {}
+    }
+    if !has_query && request.collection.as_deref() == Some("recently_played") {
+        sql.push_str("ORDER BY s.last_played_at DESC ");
+    } else {
+        sql.push_str("ORDER BY COALESCE(s.display_name,s.name) COLLATE NOCASE ");
+    }
     sql.push_str("LIMIT ? OFFSET ?");
     values.push(request.limit.clamp(1, 1000).into());
     values.push(request.offset.max(0).into());
@@ -409,18 +466,76 @@ pub fn get_stats(db_path: &Path) -> Result<LibraryStats> {
         let (category, count) = row?;
         categories.insert(category, count);
     }
+    let mut subcategories = std::collections::BTreeMap::new();
+    let mut subcategory_statement = connection.prepare("SELECT category, subcategory, COUNT(*) FROM sounds GROUP BY category, subcategory ORDER BY category, COUNT(*) DESC")?;
+    for row in subcategory_statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)))? {
+        let (category, subcategory, count) = row?;
+        subcategories.entry(category).or_insert_with(std::collections::BTreeMap::new).insert(subcategory, count);
+    }
+    let mut smart_collections = std::collections::BTreeMap::new();
+    let smart_counts: (i64, i64, i64, i64) = connection.query_row(
+        "SELECT COALESCE(SUM(last_played_at IS NOT NULL),0), COALESCE(SUM(duration IS NOT NULL AND duration<=10),0), COALESCE(SUM(sample_rate>=96000),0), COALESCE(SUM((display_name IS NULL OR display_name='') AND name GLOB '*[A-Za-z]*'),0) FROM sounds",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    smart_collections.insert("recently_played".into(), smart_counts.0);
+    smart_collections.insert("short".into(), smart_counts.1);
+    smart_collections.insert("high_res".into(), smart_counts.2);
+    smart_collections.insert("needs_translation".into(), smart_counts.3);
     let mut library_statement = connection.prepare(
         "SELECT l.path, l.name, COUNT(s.path), l.added_at FROM libraries l LEFT JOIN sounds s ON s.library_path=l.path GROUP BY l.path ORDER BY l.added_at DESC"
     )?;
     let libraries = library_statement
         .query_map([], |row| Ok(LibraryRow { path: row.get(0)?, name: row.get(1)?, sound_count: row.get(2)?, added_at: row.get(3)? }))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(LibraryStats { total, total_bytes, favorites, categories, libraries })
+    Ok(LibraryStats { total, total_bytes, favorites, categories, subcategories, smart_collections, libraries })
 }
 
 pub fn set_favorite(db_path: &Path, path: &str, favorite: bool) -> Result<()> {
     let connection = open_db(db_path)?;
     connection.execute("UPDATE sounds SET favorite=?2 WHERE path=?1", params![path, favorite as i64])?;
+    Ok(())
+}
+
+pub fn original_sound_name(db_path: &Path, path: &str) -> Result<String> {
+    let connection = open_db(db_path)?;
+    Ok(connection.query_row("SELECT name FROM sounds WHERE path=?1", params![path], |row| row.get(0))?)
+}
+
+pub fn set_sound_display_name(db_path: &Path, path: &str, display_name: Option<&str>) -> Result<SoundNameUpdate> {
+    let connection = open_db(db_path)?;
+    let normalized = display_name.map(str::trim).filter(|name| !name.is_empty());
+    connection.execute(
+        "UPDATE sounds SET previous_display_name=COALESCE(display_name,''), display_name=?2 WHERE path=?1",
+        params![path, normalized],
+    )?;
+    sound_name_update(&connection, path)
+}
+
+pub fn undo_sound_display_name(db_path: &Path, path: &str) -> Result<SoundNameUpdate> {
+    let connection = open_db(db_path)?;
+    connection.execute(
+        "UPDATE sounds SET display_name=NULLIF(previous_display_name,''), previous_display_name=COALESCE(display_name,'') WHERE path=?1 AND previous_display_name IS NOT NULL",
+        params![path],
+    )?;
+    sound_name_update(&connection, path)
+}
+
+fn sound_name_update(connection: &Connection, path: &str) -> Result<SoundNameUpdate> {
+    Ok(connection.query_row(
+        "SELECT display_name, previous_display_name IS NOT NULL FROM sounds WHERE path=?1",
+        params![path],
+        |row| Ok(SoundNameUpdate { display_name: row.get(0)?, can_undo_name: row.get::<_, i64>(1)? != 0 }),
+    )?)
+}
+
+pub fn record_sound_played(db_path: &Path, path: &str) -> Result<()> {
+    let connection = open_db(db_path)?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis().min(i64::MAX as u128) as i64;
+    connection.execute(
+        "UPDATE sounds SET last_played_at=?2, play_count=play_count+1 WHERE path=?1",
+        params![path, now],
+    )?;
     Ok(())
 }
 
@@ -431,4 +546,44 @@ pub fn remove_library(db_path: &Path, path: &str) -> Result<()> {
     transaction.execute("DELETE FROM libraries WHERE path=?1", params![path])?;
     transaction.commit()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_db() -> PathBuf {
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("sound-island-{suffix}.db"));
+        init_db(&path).unwrap();
+        let connection = open_db(&path).unwrap();
+        connection.execute("INSERT INTO libraries(path,name,added_at) VALUES('/test','Test',1)", []).unwrap();
+        connection.execute(
+            "INSERT INTO sounds(path,name,extension,file_size,modified_at,category,subcategory,tags,library_path,last_seen_scan) VALUES('/test/body.wav','body falls hard','wav',1,1,'拟音 Foley','身体 / Body','[]','/test',1)",
+            [],
+        ).unwrap();
+        path
+    }
+
+    #[test]
+    fn display_name_can_undo_to_original_and_redo() {
+        let path = test_db();
+        let translated = set_sound_display_name(&path, "/test/body.wav", Some("身体重摔")).unwrap();
+        assert_eq!(translated.display_name.as_deref(), Some("身体重摔"));
+        assert!(translated.can_undo_name);
+
+        let original = undo_sound_display_name(&path, "/test/body.wav").unwrap();
+        assert_eq!(original.display_name, None);
+        assert!(original.can_undo_name);
+
+        let redone = undo_sound_display_name(&path, "/test/body.wav").unwrap();
+        assert_eq!(redone.display_name.as_deref(), Some("身体重摔"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn ignores_macos_resource_fork_audio_files() {
+        assert!(!supported_audio(Path::new("._hidden.wav")));
+        assert!(supported_audio(Path::new("visible.wav")));
+    }
 }

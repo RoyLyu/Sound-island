@@ -1,7 +1,9 @@
 mod classify;
 mod db;
+mod translation;
+mod waveform;
 
-use db::{AppState, LibraryStats, ScanSummary, SearchRequest, SoundRow};
+use db::{AppState, LibraryStats, ScanSummary, SearchRequest, SoundNameUpdate, SoundRow};
 use std::path::PathBuf;
 use tauri::{Manager, State};
 
@@ -57,6 +59,58 @@ async fn set_favorite(
 }
 
 #[tauri::command]
+async fn get_waveform(path: String, bins: usize) -> Result<Vec<f32>, String> {
+    tauri::async_runtime::spawn_blocking(move || waveform::peaks(std::path::Path::new(&path), bins))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn translate_sound_name(state: State<'_, AppState>, path: String) -> Result<SoundNameUpdate, String> {
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let original = db::original_sound_name(&db_path, &path)?;
+        let translated = translation::translate_name(&original);
+        db::set_sound_display_name(&db_path, &path, Some(&translated))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn set_sound_display_name(
+    state: State<'_, AppState>,
+    path: String,
+    display_name: Option<String>,
+) -> Result<SoundNameUpdate, String> {
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || db::set_sound_display_name(&db_path, &path, display_name.as_deref()))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn undo_sound_display_name(state: State<'_, AppState>, path: String) -> Result<SoundNameUpdate, String> {
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || db::undo_sound_display_name(&db_path, &path))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn record_sound_played(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || db::record_sound_played(&db_path, &path))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn remove_library(state: State<'_, AppState>, path: String) -> Result<(), String> {
     let db_path = state.db_path.clone();
     tauri::async_runtime::spawn_blocking(move || db::remove_library(&db_path, &path))
@@ -90,6 +144,11 @@ pub fn run() {
             search_sounds,
             get_library_stats,
             set_favorite,
+            get_waveform,
+            translate_sound_name,
+            set_sound_display_name,
+            undo_sound_display_name,
+            record_sound_played,
             remove_library,
             reveal_in_file_manager
         ])

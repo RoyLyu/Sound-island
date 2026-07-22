@@ -9,5 +9,3 @@ src-tauri/gen/
 .DS_Store
 .idea/
 .vscode/
-src-tauri/icons/
-!src-tauri/icons/.gitkeep
