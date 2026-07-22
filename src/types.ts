@@ -36,6 +36,13 @@ export type Library = {
   name: string;
   soundCount: number;
   addedAt: number;
+  childFolders: LibraryFolder[];
+};
+
+export type LibraryFolder = {
+  path: string;
+  name: string;
+  soundCount: number;
 };
 
 export type LibraryStats = {
@@ -50,13 +57,35 @@ export type LibraryStats = {
 
 export type SearchRequest = {
   query: string;
+  scope?: "all" | "name" | "category" | "tags" | "path";
   category?: string | null;
   subcategory?: string | null;
   collection?: string | null;
   favoritesOnly: boolean;
   libraryPath?: string | null;
+  folderPath?: string | null;
   limit: number;
   offset: number;
+};
+
+export type SoundLabSettings = {
+  preset: string;
+  lowGainDb: number;
+  midGainDb: number;
+  highGainDb: number;
+  reverbMix: number;
+  delayMix: number;
+  delayMs: number;
+  delayFeedback: number;
+  distortion: number;
+  outputGainDb: number;
+};
+
+export type SoundLabExport = {
+  outputPath: string;
+  duration: number;
+  sampleRate: number;
+  channels: number;
 };
 
 export type SoundNameUpdate = {

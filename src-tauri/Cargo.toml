@@ -1,6 +1,6 @@
 [package]
 name = "sound-island"
-version = "0.2.2"
+version = "0.3.0"
 description = "Local-first sound effects library manager"
 authors = ["Sound Island contributors"]
 license = "MIT"
@@ -17,6 +17,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 anyhow = "1"
+hound = "3.5"
 rusqlite = { version = "0.37", features = ["bundled", "modern_sqlite"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
