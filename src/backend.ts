@@ -1,6 +1,6 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { LibraryStats, ScanSummary, SearchRequest, Sound } from "./types";
+import type { LibraryStats, ScanSummary, SearchRequest, Sound, SoundNameUpdate } from "./types";
 
 declare global {
   interface Window {
@@ -38,6 +38,26 @@ export async function removeLibrary(path: string) {
 
 export async function revealSound(path: string) {
   await invoke<void>("reveal_in_file_manager", { path });
+}
+
+export async function getWaveform(path: string, bins = 220) {
+  return invoke<number[]>("get_waveform", { path, bins });
+}
+
+export async function translateSoundName(path: string) {
+  return invoke<SoundNameUpdate>("translate_sound_name", { path });
+}
+
+export async function setSoundDisplayName(path: string, displayName: string | null) {
+  return invoke<SoundNameUpdate>("set_sound_display_name", { path, displayName });
+}
+
+export async function undoSoundDisplayName(path: string) {
+  return invoke<SoundNameUpdate>("undo_sound_display_name", { path });
+}
+
+export async function recordSoundPlayed(path: string) {
+  return invoke<void>("record_sound_played", { path });
 }
 
 export function audioSource(path: string) {

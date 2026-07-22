@@ -12,6 +12,8 @@ export type Category =
 export type Sound = {
   path: string;
   name: string;
+  displayName?: string | null;
+  canUndoName: boolean;
   extension: string;
   fileSize: number;
   modifiedAt: number;
@@ -25,6 +27,8 @@ export type Sound = {
   sampleRate?: number | null;
   channels?: number | null;
   bitDepth?: number | null;
+  lastPlayedAt?: number | null;
+  playCount: number;
 };
 
 export type Library = {
@@ -39,16 +43,25 @@ export type LibraryStats = {
   totalBytes: number;
   favorites: number;
   categories: Record<string, number>;
+  subcategories: Record<string, Record<string, number>>;
+  smartCollections: Record<string, number>;
   libraries: Library[];
 };
 
 export type SearchRequest = {
   query: string;
   category?: string | null;
+  subcategory?: string | null;
+  collection?: string | null;
   favoritesOnly: boolean;
   libraryPath?: string | null;
   limit: number;
   offset: number;
+};
+
+export type SoundNameUpdate = {
+  displayName?: string | null;
+  canUndoName: boolean;
 };
 
 export type ScanSummary = {
