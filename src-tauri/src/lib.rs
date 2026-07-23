@@ -1,10 +1,12 @@
 mod classify;
 mod db;
+mod file_ops;
 mod sound_lab;
 mod translation;
 mod waveform;
 
 use db::{AppState, LibraryStats, ScanSummary, SearchRequest, SoundNameUpdate, SoundRow};
+use file_ops::FileExport;
 use sound_lab::{SoundLabExport, SoundLabSettings};
 use std::path::PathBuf;
 use tauri::{Manager, State};
@@ -72,12 +74,35 @@ async fn get_waveform(path: String, bins: usize) -> Result<Vec<f32>, String> {
 async fn translate_sound_name(
     state: State<'_, AppState>,
     path: String,
+    original_name: String,
 ) -> Result<SoundNameUpdate, String> {
     let db_path = state.db_path.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let original = db::original_sound_name(&db_path, &path)?;
-        let translated = translation::translate_name(&original);
+        let indexed_name = db::original_sound_name(&db_path, &path)?;
+        if indexed_name != original_name {
+            anyhow::bail!("索引中的音频名称已变化，请重新扫描后再翻译");
+        }
+        let translated = translation::translate_name(&original_name);
+        if translated.trim() == original_name.trim() {
+            anyhow::bail!("当前音频名称没有可翻译的英文语义");
+        }
         db::set_sound_display_name(&db_path, &path, Some(&translated))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn export_selected_sound(
+    input_path: String,
+    output_path: String,
+) -> Result<FileExport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        file_ops::copy_sound(
+            std::path::Path::new(&input_path),
+            std::path::Path::new(&output_path),
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -156,6 +181,7 @@ async fn export_sound_lab_audio(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_drag::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let app_data = app.path().app_data_dir()?;
@@ -177,6 +203,7 @@ pub fn run() {
             set_sound_display_name,
             undo_sound_display_name,
             record_sound_played,
+            export_selected_sound,
             remove_library,
             reveal_in_file_manager,
             export_sound_lab_audio

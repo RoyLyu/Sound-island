@@ -18,6 +18,14 @@ pub struct SoundLabSettings {
     pub delay_feedback: f32,
     pub distortion: f32,
     pub output_gain_db: f32,
+    pub stereo_width: f32,
+    pub mono_bass_hz: f32,
+    pub center_preserve: bool,
+    pub mono_compatibility: bool,
+    pub mono_stereoize: bool,
+    pub stereoize_amount: f32,
+    pub space_preset: String,
+    pub occlusion_preset: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -70,6 +78,22 @@ impl Biquad {
         self.z1 = self.b1 * input - self.a1 * output + self.z2;
         self.z2 = self.b2 * input - self.a2 * output;
         output
+    }
+
+    fn lowpass(sample_rate: f32, frequency: f32, q: f32) -> Self {
+        let omega = 2.0 * std::f32::consts::PI * frequency / sample_rate;
+        let alpha = omega.sin() / (2.0 * q);
+        let cos = omega.cos();
+        let a0 = 1.0 + alpha;
+        Self {
+            b0: ((1.0 - cos) / 2.0) / a0,
+            b1: (1.0 - cos) / a0,
+            b2: ((1.0 - cos) / 2.0) / a0,
+            a1: (-2.0 * cos) / a0,
+            a2: (1.0 - alpha) / a0,
+            z1: 0.0,
+            z2: 0.0,
+        }
     }
 }
 
@@ -162,7 +186,155 @@ fn decode(path: &Path) -> Result<DecodedAudio> {
     })
 }
 
+fn stereoize_mono(audio: &mut DecodedAudio, amount: f32) {
+    if audio.channels != 1 {
+        return;
+    }
+    let amount = amount.clamp(0.0, 1.0);
+    let original = std::mem::take(&mut audio.samples);
+    let micro_delay = (audio.sample_rate as f32 * (0.002 + amount * 0.006)) as usize;
+    let left_reflection = (audio.sample_rate as f32 * 0.011) as usize;
+    let right_reflection = (audio.sample_rate as f32 * 0.017) as usize;
+    let mut stereo = Vec::with_capacity(original.len() * 2);
+    for index in 0..original.len() {
+        let direct = original[index];
+        let delayed = original
+            .get(index.saturating_sub(micro_delay))
+            .copied()
+            .unwrap_or(0.0);
+        let left_early = original
+            .get(index.saturating_sub(left_reflection))
+            .copied()
+            .unwrap_or(0.0);
+        let right_early = original
+            .get(index.saturating_sub(right_reflection))
+            .copied()
+            .unwrap_or(0.0);
+        let left = direct + left_early * amount * 0.16;
+        let right =
+            direct * (1.0 - amount * 0.03) + delayed * amount * 0.08 + right_early * amount * 0.18;
+        let mid = (left + right) * 0.5;
+        let side = (left - right) * 0.5 * amount;
+        stereo.push(mid + side);
+        stereo.push(mid - side);
+    }
+    audio.samples = stereo;
+    audio.channels = 2;
+}
+
+fn phase_correlation(audio: &DecodedAudio) -> f32 {
+    if audio.channels < 2 {
+        return 1.0;
+    }
+    let mut cross = 0.0f64;
+    let mut left_energy = 0.0f64;
+    let mut right_energy = 0.0f64;
+    for frame in audio.samples.chunks_exact(audio.channels) {
+        let left = frame[0] as f64;
+        let right = frame[1] as f64;
+        cross += left * right;
+        left_energy += left * left;
+        right_energy += right * right;
+    }
+    let denominator = (left_energy * right_energy).sqrt();
+    if denominator <= f64::EPSILON {
+        1.0
+    } else {
+        (cross / denominator).clamp(-1.0, 1.0) as f32
+    }
+}
+
+fn reduce_side(audio: &mut DecodedAudio, factor: f32) {
+    for frame in audio.samples.chunks_exact_mut(audio.channels) {
+        let mid = (frame[0] + frame[1]) * 0.5;
+        let side = (frame[0] - frame[1]) * 0.5 * factor;
+        frame[0] = mid + side;
+        frame[1] = mid - side;
+    }
+}
+
+fn apply_stereo_field(audio: &mut DecodedAudio, settings: &SoundLabSettings) {
+    if audio.channels < 2 {
+        return;
+    }
+    let width = settings.stereo_width.clamp(0.0, 2.0);
+    let width = if settings.mono_compatibility {
+        width.min(1.6)
+    } else {
+        width
+    };
+    let center_scale = if settings.center_preserve {
+        1.0
+    } else {
+        (2.0 - width).clamp(0.65, 1.0)
+    };
+    let cutoff = settings.mono_bass_hz.clamp(80.0, 250.0);
+    let smoothing = 1.0 - (-2.0 * std::f32::consts::PI * cutoff / audio.sample_rate as f32).exp();
+    let mut low_left = 0.0f32;
+    let mut low_right = 0.0f32;
+    for frame in audio.samples.chunks_exact_mut(audio.channels) {
+        let left = frame[0];
+        let right = frame[1];
+        low_left += smoothing * (left - low_left);
+        low_right += smoothing * (right - low_right);
+        let (field_left, field_right) = if settings.mono_compatibility {
+            let low_mid = (low_left + low_right) * 0.5;
+            (low_mid + left - low_left, low_mid + right - low_right)
+        } else {
+            (left, right)
+        };
+        let mid = (field_left + field_right) * 0.5 * center_scale;
+        let side = (field_left - field_right) * 0.5 * width;
+        frame[0] = mid + side;
+        frame[1] = mid - side;
+    }
+    if settings.mono_compatibility {
+        for _ in 0..8 {
+            if phase_correlation(audio) >= 0.05 {
+                break;
+            }
+            reduce_side(audio, 0.76);
+        }
+        if phase_correlation(audio) < 0.05 {
+            reduce_side(audio, 0.0);
+        }
+    }
+}
+
+fn space_profile(name: &str) -> ([f32; 4], f32) {
+    match name {
+        "bathroom" => ([0.018, 0.024, 0.031, 0.039], 0.72),
+        "corridor" => ([0.041, 0.057, 0.071, 0.089], 0.76),
+        "tunnel" => ([0.073, 0.097, 0.131, 0.167], 0.82),
+        "parking" => ([0.051, 0.067, 0.083, 0.109], 0.79),
+        "car" => ([0.009, 0.014, 0.019, 0.027], 0.64),
+        "church" => ([0.089, 0.127, 0.173, 0.223], 0.88),
+        "warehouse" => ([0.061, 0.079, 0.103, 0.137], 0.83),
+        "small-room" => ([0.013, 0.019, 0.027, 0.034], 0.67),
+        "valley" => ([0.137, 0.193, 0.251, 0.337], 0.86),
+        "underwater" => ([0.024, 0.037, 0.053, 0.071], 0.78),
+        "metal-container" => ([0.007, 0.011, 0.017, 0.023], 0.73),
+        _ => ([0.0297, 0.0371, 0.0411, 0.0437], 0.66),
+    }
+}
+
+fn occlusion_profile(name: &str) -> Option<(f32, f32)> {
+    match name {
+        "door" => Some((4_800.0, -4.0)),
+        "wall" => Some((2_500.0, -8.0)),
+        "two-walls" => Some((1_250.0, -14.0)),
+        "upstairs" => Some((1_900.0, -10.0)),
+        "downstairs" => Some((1_550.0, -11.0)),
+        "outside-car" => Some((2_800.0, -8.0)),
+        "helmet" => Some((1_350.0, -10.0)),
+        _ => None,
+    }
+}
+
 fn process(audio: &mut DecodedAudio, settings: &SoundLabSettings) {
+    if settings.mono_stereoize {
+        stereoize_mono(audio, settings.stereoize_amount);
+    }
     let channels = audio.channels;
     let sample_rate = audio.sample_rate as f32;
     let mut low = vec![
@@ -228,8 +400,8 @@ fn process(audio: &mut DecodedAudio, settings: &SoundLabSettings) {
 
     let reverb_mix = settings.reverb_mix.clamp(0.0, 1.0);
     if reverb_mix > 0.001 {
-        let lengths = [0.0297f32, 0.0371, 0.0411, 0.0437];
-        let decay = 0.66 + reverb_mix * 0.22;
+        let (lengths, profile_decay) = space_profile(&settings.space_preset);
+        let decay = profile_decay + reverb_mix * (0.9 - profile_decay);
         let mut combs: Vec<Vec<CombFilter>> = (0..channels)
             .map(|channel| {
                 lengths
@@ -251,6 +423,18 @@ fn process(audio: &mut DecodedAudio, settings: &SoundLabSettings) {
                     .sum::<f32>()
                     / lengths.len() as f32;
                 frame[channel] = input * (1.0 - reverb_mix * 0.55) + wet * reverb_mix;
+            }
+        }
+    }
+
+    apply_stereo_field(audio, settings);
+
+    if let Some((cutoff, gain_db)) = occlusion_profile(&settings.occlusion_preset) {
+        let mut filters = vec![Biquad::lowpass(sample_rate, cutoff, 0.707); channels];
+        let attenuation = 10f32.powf(gain_db / 20.0);
+        for frame in audio.samples.chunks_exact_mut(channels) {
+            for channel in 0..channels {
+                frame[channel] = filters[channel].process(frame[channel]) * attenuation;
             }
         }
     }
@@ -330,6 +514,14 @@ mod tests {
             delay_feedback: 0.25,
             distortion: 0.08,
             output_gain_db: -1.0,
+            stereo_width: 1.0,
+            mono_bass_hz: 120.0,
+            center_preserve: true,
+            mono_compatibility: true,
+            mono_stereoize: true,
+            stereoize_amount: 0.65,
+            space_preset: "small-room".into(),
+            occlusion_preset: "none".into(),
         }
     }
 
@@ -358,12 +550,78 @@ mod tests {
 
         let result = export(&source, &output, settings()).unwrap();
         assert_eq!(result.sample_rate, 48_000);
-        assert_eq!(result.channels, 1);
+        assert_eq!(result.channels, 2);
         assert!(output.exists());
         assert_eq!(std::fs::read(&source).unwrap(), source_before);
         assert_ne!(std::fs::read(&output).unwrap(), source_before);
         let _ = std::fs::remove_file(source);
         let _ = std::fs::remove_file(output);
+    }
+
+    #[test]
+    fn stereoizes_mono_with_phase_safe_difference() {
+        let mut audio = DecodedAudio {
+            samples: (0..4_800)
+                .map(|index| (index as f32 * 0.07).sin())
+                .collect(),
+            sample_rate: 48_000,
+            channels: 1,
+        };
+        stereoize_mono(&mut audio, 0.8);
+        assert_eq!(audio.channels, 2);
+        assert!(audio
+            .samples
+            .chunks_exact(2)
+            .any(|frame| (frame[0] - frame[1]).abs() > 0.0001));
+        assert!(phase_correlation(&audio) > 0.05);
+    }
+
+    #[test]
+    fn compatibility_protection_collapses_unrecoverable_negative_phase() {
+        let mut audio = DecodedAudio {
+            samples: (0..4_800)
+                .flat_map(|index| {
+                    let sample = (index as f32 * 0.07).sin();
+                    [sample, -sample]
+                })
+                .collect(),
+            sample_rate: 48_000,
+            channels: 2,
+        };
+        let mut protected = settings();
+        protected.stereo_width = 2.0;
+        apply_stereo_field(&mut audio, &protected);
+        assert!(phase_correlation(&audio) >= 0.05);
+    }
+
+    #[test]
+    fn exposes_every_requested_space_and_occlusion_profile() {
+        for name in [
+            "bathroom",
+            "corridor",
+            "tunnel",
+            "parking",
+            "car",
+            "church",
+            "warehouse",
+            "small-room",
+            "valley",
+            "underwater",
+            "metal-container",
+        ] {
+            assert_ne!(space_profile(name), space_profile("none"));
+        }
+        for name in [
+            "door",
+            "wall",
+            "two-walls",
+            "upstairs",
+            "downstairs",
+            "outside-car",
+            "helmet",
+        ] {
+            assert!(occlusion_profile(name).is_some());
+        }
     }
 
     #[test]
