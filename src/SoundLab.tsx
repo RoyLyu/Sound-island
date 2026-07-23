@@ -10,6 +10,7 @@ type Props = {
 };
 
 type Comparison = "processed" | "original";
+type Workspace = "tone" | "stereo" | "mono" | "space" | "occlusion";
 
 const spatialDefaults = {
   stereoWidth: 1,
@@ -71,7 +72,21 @@ const presets: Array<{ name: string; description: string; settings: SoundLabSett
   },
 ];
 
+const workspaceCards: Array<{ id: Exclude<Workspace, "tone">; name: string; description: string }> = [
+  { id: "stereo", name: "立体声拓宽", description: "宽度、低频保护与相位监测" },
+  { id: "mono", name: "单声道立体化", description: "相位安全的高频微差与短反射" },
+  { id: "space", name: "空间迁移", description: "浴室、隧道、教堂与更多声场" },
+  { id: "occlusion", name: "隔墙与遮挡", description: "门墙、楼层、车外与头盔听感" },
+];
+
 const defaultSettings = presets[0].settings;
+
+function formatLabTime(seconds: number) {
+  if (!Number.isFinite(seconds)) return "0:00.00";
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds - minutes * 60;
+  return `${minutes}:${rest.toFixed(2).padStart(5, "0")}`;
+}
 
 function distortionCurve(amount: number) {
   if (amount <= 0.001) return null;
@@ -105,7 +120,7 @@ type AnalysisGraph = { spectrum: AnalyserNode; left: AnalyserNode; right: Analys
 
 function connectAnalysis(context: AudioContext, input: AudioNode): AnalysisGraph {
   const spectrum = context.createAnalyser();
-  spectrum.fftSize = 8192;
+  spectrum.fftSize = 1024;
   spectrum.minDecibels = -100;
   spectrum.maxDecibels = -10;
   spectrum.smoothingTimeConstant = 0.72;
@@ -274,6 +289,7 @@ function Slider({ label, value, min, max, step, suffix, onChange }: { label: str
 
 export function SoundLab({ sound, onClose, onNotice }: Props) {
   const [settings, setSettings] = useState<SoundLabSettings>(defaultSettings);
+  const [workspace, setWorkspace] = useState<Workspace>("tone");
   const [comparison, setComparison] = useState<Comparison>("processed");
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -294,12 +310,17 @@ export function SoundLab({ sound, onClose, onNotice }: Props) {
   const comparisonRef = useRef(comparison);
   const analysisRef = useRef<AnalysisGraph | null>(null);
   const correlationFrameRef = useRef(0);
+  const lastProgressUpdateRef = useRef(0);
+  const resumeAfterSeekRef = useRef(false);
+  const refreshTimerRef = useRef<number | null>(null);
 
   settingsRef.current = settings;
   comparisonRef.current = comparison;
   progressRef.current = progress;
 
   const stopSource = useCallback((reset = false) => {
+    if (refreshTimerRef.current) window.clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = null;
     if (animationRef.current) cancelAnimationFrame(animationRef.current);
     animationRef.current = null;
     const source = sourceRef.current;
@@ -368,6 +389,7 @@ export function SoundLab({ sound, onClose, onNotice }: Props) {
     sourceRef.current = source;
     startOffsetRef.current = offset;
     startedAtRef.current = context.currentTime;
+    lastProgressUpdateRef.current = 0;
     source.onended = () => {
       if (sourceRef.current !== source) return;
       sourceRef.current = null;
@@ -376,12 +398,16 @@ export function SoundLab({ sound, onClose, onNotice }: Props) {
     };
     source.start(0, offset);
     setPlaying(true);
-    const tick = () => {
+    const tick = (timestamp: number) => {
       if (sourceRef.current !== source) return;
       const next = Math.min(1, (startOffsetRef.current + context.currentTime - startedAtRef.current) / buffer.duration);
-      setProgress(next);
+      if (timestamp - lastProgressUpdateRef.current >= 80 || next >= 1) {
+        lastProgressUpdateRef.current = timestamp;
+        progressRef.current = next;
+        setProgress(next);
+      }
       correlationFrameRef.current += 1;
-      if (correlationFrameRef.current % 6 === 0) {
+      if (correlationFrameRef.current % 15 === 0) {
         if (buffer.numberOfChannels === 1 && (mode === "original" || !settingsRef.current.monoStereoize)) {
           setPhaseCorrelation(1);
         } else if (analysisRef.current) {
@@ -421,16 +447,26 @@ export function SoundLab({ sound, onClose, onNotice }: Props) {
   };
 
   const applyPreset = (preset: typeof presets[number]) => {
+    setWorkspace("tone");
     settingsRef.current = preset.settings;
     setSettings(preset.settings);
     if (playing && comparisonRef.current === "processed") void startAudition("processed", progressRef.current);
+  };
+
+  const scheduleProcessedRefresh = () => {
+    if (!playing || comparisonRef.current !== "processed") return;
+    if (refreshTimerRef.current) window.clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = window.setTimeout(() => {
+      refreshTimerRef.current = null;
+      void startAudition("processed", progressRef.current);
+    }, 90);
   };
 
   const update = <Key extends keyof SoundLabSettings>(key: Key, value: SoundLabSettings[Key]) => {
     const next = { ...settingsRef.current, preset: "custom", [key]: value };
     settingsRef.current = next;
     setSettings(next);
-    if (playing && comparisonRef.current === "processed") void startAudition("processed", progressRef.current);
+    scheduleProcessedRefresh();
   };
 
   const applySpace = (option: typeof spaceOptions[number]) => {
@@ -446,6 +482,24 @@ export function SoundLab({ sound, onClose, onNotice }: Props) {
     settingsRef.current = next;
     setSettings(next);
     if (playing && comparisonRef.current === "processed") void startAudition("processed", progressRef.current);
+  };
+
+  const setSeekProgress = (value: number) => {
+    const next = Math.max(0, Math.min(1, value));
+    progressRef.current = next;
+    setProgress(next);
+  };
+
+  const beginSeek = () => {
+    resumeAfterSeekRef.current = playing;
+    if (playing) stopSource();
+  };
+
+  const finishSeek = () => {
+    if (resumeAfterSeekRef.current) {
+      resumeAfterSeekRef.current = false;
+      void startAudition(comparisonRef.current, progressRef.current);
+    }
   };
 
   const exportAudio = async () => {
@@ -487,38 +541,28 @@ export function SoundLab({ sound, onClose, onNotice }: Props) {
       <div className="lab-body">
         <aside className="lab-presets">
           <label>一键声音方案</label>
-          {presets.map((preset) => <button key={preset.settings.preset} aria-pressed={settings.preset === preset.settings.preset} className={settings.preset === preset.settings.preset ? "active" : ""} onClick={() => applyPreset(preset)}><i/><span><strong>{preset.name}</strong><small>{preset.description}</small></span></button>)}
+          {presets.map((preset) => <button key={preset.settings.preset} aria-pressed={workspace === "tone" && settings.preset === preset.settings.preset} className={workspace === "tone" && settings.preset === preset.settings.preset ? "active" : ""} onClick={() => applyPreset(preset)}><i/><span><strong>{preset.name}</strong><small>{preset.description}</small></span></button>)}
           <label className="lab-tools-label">空间与声场工具</label>
-          <details className="lab-tool" open>
-            <summary><span>STEREO FIELD</span><strong>立体声拓宽</strong></summary>
-            <Slider label="宽度" value={Math.round(settings.stereoWidth * 100)} min={0} max={200} step={1} suffix="%" onChange={(value) => update("stereoWidth", value / 100)}/>
-            <Slider label="低频单声道保护" value={settings.monoBassHz} min={80} max={250} step={1} suffix=" Hz" onChange={(value) => update("monoBassHz", value)}/>
-            <div className="lab-switches"><button aria-pressed={settings.centerPreserve} className={settings.centerPreserve ? "active" : ""} onClick={() => update("centerPreserve", !settings.centerPreserve)}>中置信号保持</button><button aria-pressed={settings.monoCompatibility} className={settings.monoCompatibility ? "active" : ""} onClick={() => update("monoCompatibility", !settings.monoCompatibility)}>单声道保护</button></div>
-            <div className={`phase-meter ${phaseCorrelation < 0 ? "danger" : phaseCorrelation < 0.25 ? "warn" : "safe"}`}><span>相位</span><i><b style={{ left: `${(phaseCorrelation + 1) * 50}%` }}/></i><strong>{phaseCorrelation >= 0 ? "+" : ""}{phaseCorrelation.toFixed(2)}</strong></div>
-          </details>
-          <details className="lab-tool">
-            <summary><span>MONO → STEREO</span><strong>单声道立体化</strong></summary>
-            <button className={`feature-toggle ${settings.monoStereoize ? "active" : ""}`} aria-pressed={settings.monoStereoize} disabled={(sound.channels ?? 0) > 1} onClick={() => update("monoStereoize", !settings.monoStereoize)}>{(sound.channels ?? 0) > 1 ? "源文件已经是多声道" : settings.monoStereoize ? "已启用相位安全立体化" : "启用单声道立体化"}</button>
-            <Slider label="立体化强度" value={Math.round(settings.stereoizeAmount * 100)} min={0} max={100} step={1} suffix="%" onChange={(value) => update("stereoizeAmount", value / 100)}/>
-          </details>
-          <details className="lab-tool">
-            <summary><span>SPACE TRANSFER</span><strong>空间迁移</strong></summary>
-            <div className="lab-option-grid">{spaceOptions.map((option) => <button key={option[0]} className={settings.spacePreset === option[0] ? "active" : ""} aria-pressed={settings.spacePreset === option[0]} onClick={() => applySpace(option)}>{option[1]}</button>)}</div>
-          </details>
-          <details className="lab-tool">
-            <summary><span>OCCLUSION</span><strong>隔墙与遮挡</strong></summary>
-            <div className="lab-option-grid">{occlusionOptions.map(([value, label]) => <button key={value} className={settings.occlusionPreset === value ? "active" : ""} aria-pressed={settings.occlusionPreset === value} onClick={() => applyOcclusion(value)}>{label}</button>)}</div>
-          </details>
+          {workspaceCards.map((card) => <button key={card.id} aria-pressed={workspace === card.id} className={workspace === card.id ? "active" : ""} onClick={() => setWorkspace(card.id)}><i/><span><strong>{card.name}</strong><small>{card.description}</small></span></button>)}
           <div className="lab-safety"><b>非破坏式流程</b><p>试听使用实时处理；导出始终创建新的 WAV，不写回原音频。</p></div>
         </aside>
         <main className="lab-console">
-          <div className="lab-visual"><div className={`lab-orb ${playing ? "active" : ""}`}><i/><i/><i/></div><Spectrum analyser={labAnalyser} active={playing} detailed className="lab-spectrum"/>{loading || loadError ? <span className="lab-analysis-state">{loading ? "正在解析音频…" : loadError}</span> : null}<div className="lab-progress"><i style={{ width: `${progress * 100}%` }}/></div></div>
-          <div className="lab-transport"><button className="lab-play" disabled={loading || !!loadError} onClick={toggleAudition}>{playing ? "Ⅱ 暂停" : "▶ 试听"}</button><div className="ab-switch" aria-label="处理前后对比"><button aria-pressed={comparison === "original"} className={comparison === "original" ? "active" : ""} onClick={() => switchComparison("original")}>A 原声</button><button aria-pressed={comparison === "processed"} className={comparison === "processed" ? "active" : ""} onClick={() => switchComparison("processed")}>B 处理后</button></div><button className="apply-preview" disabled={loading || !!loadError} onClick={() => void startAudition("processed", progressRef.current)}>应用并试听</button><span>{Math.round(progress * (sound.duration || 0) * 100) / 100}s / {Math.round((sound.duration || 0) * 100) / 100}s</span></div>
-          <div className="lab-modules">
+          <div className="lab-visual">
+            <div className={`lab-orb ${playing ? "active" : ""}`}><i/><i/><i/></div>
+            <Spectrum analyser={labAnalyser} active={playing} className="lab-spectrum"/>
+            {loading || loadError ? <span className="lab-analysis-state">{loading ? "正在解析音频…" : loadError}</span> : null}
+            <input className="lab-seek" style={{ background: `linear-gradient(90deg, #7968ee 0 ${progress * 100}%, #243441 ${progress * 100}% 100%)` }} type="range" min={0} max={1000} step={1} value={Math.round(progress * 1000)} disabled={loading || !!loadError} aria-label="试听进度" onPointerDown={beginSeek} onPointerUp={finishSeek} onPointerCancel={finishSeek} onChange={(event) => setSeekProgress(Number(event.target.value) / 1000)}/>
+          </div>
+          <div className="lab-transport"><button className="lab-play" disabled={loading || !!loadError} onClick={toggleAudition}>{playing ? "Ⅱ 暂停" : "▶ 试听"}</button><div className="ab-switch" aria-label="处理前后对比"><button aria-pressed={comparison === "original"} className={comparison === "original" ? "active" : ""} onClick={() => switchComparison("original")}>A 原声</button><button aria-pressed={comparison === "processed"} className={comparison === "processed" ? "active" : ""} onClick={() => switchComparison("processed")}>B 处理后</button></div><button className="apply-preview" disabled={loading || !!loadError} onClick={() => void startAudition("processed", progressRef.current)}>应用并试听</button><span>{formatLabTime(progress * (bufferRef.current?.duration || sound.duration || 0))} / {formatLabTime(bufferRef.current?.duration || sound.duration || 0)}</span></div>
+          {workspace === "tone" ? <div className="lab-modules">
             <section><header><span>EQ</span><strong>三段均衡</strong></header><Slider label="低频 160 Hz" value={settings.lowGainDb} min={-18} max={18} step={0.5} suffix=" dB" onChange={(value) => update("lowGainDb", value)}/><Slider label="中频 1.4 kHz" value={settings.midGainDb} min={-18} max={18} step={0.5} suffix=" dB" onChange={(value) => update("midGainDb", value)}/><Slider label="高频 6.5 kHz" value={settings.highGainDb} min={-18} max={18} step={0.5} suffix=" dB" onChange={(value) => update("highGainDb", value)}/></section>
             <section><header><span>SPACE</span><strong>空间与延迟</strong></header><Slider label="混响量" value={settings.reverbMix} min={0} max={1} step={0.01} suffix="" onChange={(value) => update("reverbMix", value)}/><Slider label="延迟量" value={settings.delayMix} min={0} max={1} step={0.01} suffix="" onChange={(value) => update("delayMix", value)}/><Slider label="延迟时间" value={settings.delayMs} min={30} max={900} step={1} suffix=" ms" onChange={(value) => update("delayMs", value)}/><Slider label="反馈" value={settings.delayFeedback} min={0} max={0.88} step={0.01} suffix="" onChange={(value) => update("delayFeedback", value)}/></section>
             <section><header><span>CHARACTER</span><strong>质感与输出</strong></header><Slider label="失真驱动" value={settings.distortion} min={0} max={1} step={0.01} suffix="" onChange={(value) => update("distortion", value)}/><Slider label="输出增益" value={settings.outputGainDb} min={-18} max={12} step={0.5} suffix=" dB" onChange={(value) => update("outputGainDb", value)}/><div className="lab-meter"><span/><span/><span/><span/><span/><span/><span/><span/></div><p>导出阶段自动限制峰值，避免数字削波。</p></section>
-          </div>
+          </div> : null}
+          {workspace === "stereo" ? <section className="lab-tool-editor"><header><span>STEREO FIELD</span><strong>立体声拓宽与相位保护</strong><p>轻量实时监测，不对高解析音频执行高精度频谱运算。</p></header><div className="lab-editor-columns"><div><Slider label="宽度" value={Math.round(settings.stereoWidth * 100)} min={0} max={200} step={1} suffix="%" onChange={(value) => update("stereoWidth", value / 100)}/><Slider label="低频单声道保护" value={settings.monoBassHz} min={80} max={250} step={1} suffix=" Hz" onChange={(value) => update("monoBassHz", value)}/></div><div><div className="lab-switches"><button aria-pressed={settings.centerPreserve} className={settings.centerPreserve ? "active" : ""} onClick={() => update("centerPreserve", !settings.centerPreserve)}>中置信号保持</button><button aria-pressed={settings.monoCompatibility} className={settings.monoCompatibility ? "active" : ""} onClick={() => update("monoCompatibility", !settings.monoCompatibility)}>单声道兼容保护</button></div><div className={`phase-meter ${phaseCorrelation < 0 ? "danger" : phaseCorrelation < 0.25 ? "warn" : "safe"}`}><span>相位相关度</span><i><b style={{ left: `${(phaseCorrelation + 1) * 50}%` }}/></i><strong>{phaseCorrelation >= 0 ? "+" : ""}{phaseCorrelation.toFixed(2)}</strong></div></div></div></section> : null}
+          {workspace === "mono" ? <section className="lab-tool-editor"><header><span>MONO → STEREO</span><strong>单声道立体化</strong><p>高频左右微差、微延迟与短反射经过相位保护后输出 Stereo。</p></header><button className={`feature-toggle ${settings.monoStereoize ? "active" : ""}`} aria-pressed={settings.monoStereoize} disabled={(sound.channels ?? 0) > 1} onClick={() => update("monoStereoize", !settings.monoStereoize)}>{(sound.channels ?? 0) > 1 ? "源文件已经是多声道" : settings.monoStereoize ? "已启用相位安全立体化" : "启用单声道立体化"}</button><Slider label="立体化强度" value={Math.round(settings.stereoizeAmount * 100)} min={0} max={100} step={1} suffix="%" onChange={(value) => update("stereoizeAmount", value / 100)}/><div className="signal-flow"><span>Mono</span><i>→</i><span>分频</span><i>→</i><span>高频微差</span><i>→</i><span>微延迟</span><i>→</i><span>短反射</span><i>→</i><span>相位保护</span><i>→</i><span>Stereo</span></div></section> : null}
+          {workspace === "space" ? <section className="lab-tool-editor"><header><span>SPACE TRANSFER</span><strong>空间迁移</strong><p>选择声学空间后仍可返回一键声音方案继续微调混响与延迟。</p></header><div className="lab-option-grid">{spaceOptions.map((option) => <button key={option[0]} className={settings.spacePreset === option[0] ? "active" : ""} aria-pressed={settings.spacePreset === option[0]} onClick={() => applySpace(option)}>{option[1]}</button>)}</div></section> : null}
+          {workspace === "occlusion" ? <section className="lab-tool-editor"><header><span>OCCLUSION</span><strong>隔墙与遮挡</strong><p>通过本地低通、衰减和空间响应生成距离与遮挡感。</p></header><div className="lab-option-grid">{occlusionOptions.map(([value, label]) => <button key={value} className={settings.occlusionPreset === value ? "active" : ""} aria-pressed={settings.occlusionPreset === value} onClick={() => applyOcclusion(value)}>{label}</button>)}</div></section> : null}
         </main>
       </div>
       <footer className="lab-footer"><div>{exported ? <><span>已导出</span><strong title={exported.outputPath}>{exported.outputPath}</strong><button onClick={() => void revealSound(exported.outputPath)}>在文件夹中显示</button></> : <><span>导出规格</span><strong>WAV · 24 bit · 保持原采样率 · {outputChannels}</strong></>}</div><button className="export-button" disabled={exporting} onClick={() => void exportAudio()}>{exporting ? "正在本地处理…" : "导出处理后的新文件"}</button></footer>
