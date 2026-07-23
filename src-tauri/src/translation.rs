@@ -1,5 +1,9 @@
 const PHRASES: &[(&str, &str)] = &[
     (
+        "sound nature of japan mountain valley river heavy stream",
+        "日本自然·山谷湍急溪流",
+    ),
+    (
         "elephant footsteps fast onboard close many walking various tempos",
         "多只大象快速行走脚步（贴身近距拾音，多种速度变化）",
     ),
@@ -72,6 +76,13 @@ const WORDS: &[(&str, &str)] = &[
     ("ambience", "环境声"),
     ("ambient", "环境声"),
     ("atmosphere", "氛围"),
+    ("sound", "声音"),
+    ("nature", "自然"),
+    ("japan", "日本"),
+    ("mountain", "山地"),
+    ("valley", "山谷"),
+    ("river", "河流"),
+    ("stream", "溪流"),
     ("rain", "雨声"),
     ("raining", "雨声"),
     ("wind", "风声"),
@@ -271,10 +282,16 @@ mod tests {
             translate_name("08 Elephant Footsteps,Fast,Onboard,Close,Many Walking Various Tempos"),
             "08 · 多只大象快速行走脚步（贴身近距拾音，多种速度变化）"
         );
+        assert_eq!(
+            translate_name("Omnibit Sound - Nature of Japan - Mountain Valley River Heavy Stream"),
+            "Omnibit · 日本自然·山谷湍急溪流"
+        );
     }
 
     #[test]
     fn preserves_catalog_codes_and_unknown_terms() {
         assert_eq!(translate_name("ZXCV_000192"), "ZXCV · 000192");
+        assert_eq!(translate_name("城市环境"), "城市环境");
+        assert_eq!(translate_name("body fall"), "身体倒地");
     }
 }

@@ -79,6 +79,14 @@ export type SoundLabSettings = {
   delayFeedback: number;
   distortion: number;
   outputGainDb: number;
+  stereoWidth: number;
+  monoBassHz: number;
+  centerPreserve: boolean;
+  monoCompatibility: boolean;
+  monoStereoize: boolean;
+  stereoizeAmount: number;
+  spacePreset: string;
+  occlusionPreset: string;
 };
 
 export type SoundLabExport = {
@@ -86,6 +94,11 @@ export type SoundLabExport = {
   duration: number;
   sampleRate: number;
   channels: number;
+};
+
+export type FileExport = {
+  outputPath: string;
+  bytesCopied: number;
 };
 
 export type SoundNameUpdate = {

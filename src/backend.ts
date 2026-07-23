@@ -1,6 +1,8 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import type { LibraryStats, ScanSummary, SearchRequest, Sound, SoundLabExport, SoundLabSettings, SoundNameUpdate } from "./types";
+import { resolveResource } from "@tauri-apps/api/path";
+import { startDrag } from "@crabnebula/tauri-plugin-drag";
+import type { FileExport, LibraryStats, ScanSummary, SearchRequest, Sound, SoundLabExport, SoundLabSettings, SoundNameUpdate } from "./types";
 
 declare global {
   interface Window {
@@ -44,8 +46,8 @@ export async function getWaveform(path: string, bins = 220) {
   return invoke<number[]>("get_waveform", { path, bins });
 }
 
-export async function translateSoundName(path: string) {
-  return invoke<SoundNameUpdate>("translate_sound_name", { path });
+export async function translateSoundName(path: string, originalName: string) {
+  return invoke<SoundNameUpdate>("translate_sound_name", { path, originalName });
 }
 
 export async function setSoundDisplayName(path: string, displayName: string | null) {
@@ -58,6 +60,23 @@ export async function undoSoundDisplayName(path: string) {
 
 export async function recordSoundPlayed(path: string) {
   return invoke<void>("record_sound_played", { path });
+}
+
+export async function dragSoundOutside(path: string, onResult?: (result: "Dropped" | "Cancelled") => void) {
+  const icon = await resolveResource("icons/128x128.png");
+  await startDrag({ item: [path], icon, mode: "copy" }, (payload) => onResult?.(payload.result));
+}
+
+export async function exportSelectedSound(inputPath: string) {
+  const filename = inputPath.split(/[\\/]/).pop() || "声屿导出音频.wav";
+  const extension = filename.includes(".") ? filename.split(".").pop() || "wav" : "wav";
+  const outputPath = await save({
+    title: "导出所选音频副本",
+    defaultPath: filename,
+    filters: [{ name: `${extension.toUpperCase()} 音频`, extensions: [extension] }],
+  });
+  if (!outputPath) return null;
+  return invoke<FileExport>("export_selected_sound", { inputPath, outputPath });
 }
 
 export async function exportSoundLabAudio(inputPath: string, settings: SoundLabSettings) {
