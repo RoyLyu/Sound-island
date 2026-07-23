@@ -36,6 +36,7 @@ export type Library = {
   name: string;
   soundCount: number;
   addedAt: number;
+  sortOrder: number;
   childFolders: LibraryFolder[];
 };
 
@@ -43,6 +44,7 @@ export type LibraryFolder = {
   path: string;
   name: string;
   soundCount: number;
+  depth: number;
 };
 
 export type LibraryStats = {
@@ -57,7 +59,6 @@ export type LibraryStats = {
 
 export type SearchRequest = {
   query: string;
-  scope?: "all" | "name" | "category" | "tags" | "path";
   category?: string | null;
   subcategory?: string | null;
   collection?: string | null;
@@ -113,6 +114,7 @@ export type ScanSummary = {
   added: number;
   updated: number;
   skipped: number;
+  rejected: number;
 };
 
 export type ScanProgress = {

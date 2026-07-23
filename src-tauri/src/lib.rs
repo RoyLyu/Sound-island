@@ -155,6 +155,15 @@ async fn remove_library(state: State<'_, AppState>, path: String) -> Result<(), 
 }
 
 #[tauri::command]
+async fn reorder_libraries(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), String> {
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || db::reorder_libraries(&db_path, &paths))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn reveal_in_file_manager(path: String) -> Result<(), String> {
     tauri_plugin_opener::reveal_item_in_dir(path).map_err(|error| error.to_string())
 }
@@ -205,6 +214,7 @@ pub fn run() {
             record_sound_played,
             export_selected_sound,
             remove_library,
+            reorder_libraries,
             reveal_in_file_manager,
             export_sound_lab_audio
         ])
