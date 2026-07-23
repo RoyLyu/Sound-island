@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { audioSource, exportSoundLabAudio, revealSound } from "./backend";
 import type { Sound, SoundLabExport, SoundLabSettings } from "./types";
-import { Spectrum } from "./Spectrum";
+import { Waveform } from "./Waveform";
+import type { WaveformHandle } from "./Waveform";
 
 type Props = {
   sound: Sound;
@@ -116,14 +117,9 @@ function impulse(context: AudioContext, mix: number, spacePreset: string) {
   return buffer;
 }
 
-type AnalysisGraph = { spectrum: AnalyserNode; left: AnalyserNode; right: AnalyserNode };
+type AnalysisGraph = { left: AnalyserNode; right: AnalyserNode };
 
 function connectAnalysis(context: AudioContext, input: AudioNode): AnalysisGraph {
-  const spectrum = context.createAnalyser();
-  spectrum.fftSize = 1024;
-  spectrum.minDecibels = -100;
-  spectrum.maxDecibels = -10;
-  spectrum.smoothingTimeConstant = 0.72;
   const splitter = context.createChannelSplitter(2);
   const left = context.createAnalyser();
   const right = context.createAnalyser();
@@ -131,15 +127,14 @@ function connectAnalysis(context: AudioContext, input: AudioNode): AnalysisGraph
   right.fftSize = 256;
   const silent = context.createGain();
   silent.gain.value = 0;
-  input.connect(spectrum);
-  spectrum.connect(context.destination);
-  spectrum.connect(splitter);
+  input.connect(context.destination);
+  input.connect(splitter);
   splitter.connect(left, 0);
   splitter.connect(right, 1);
   left.connect(silent);
   right.connect(silent);
   silent.connect(context.destination);
-  return { spectrum, left, right };
+  return { left, right };
 }
 
 function stereoizeMono(context: AudioContext, input: AudioNode, amount: number) {
@@ -287,6 +282,24 @@ function Slider({ label, value, min, max, step, suffix, onChange }: { label: str
   return <label className="lab-slider"><span><b>{label}</b><em>{value > 0 && min < 0 ? "+" : ""}{value}{suffix}</em></span><input type="range" min={min} max={max} step={step} value={value} onChange={(event) => onChange(Number(event.target.value))}/></label>;
 }
 
+function extractWaveformPeaks(buffer: AudioBuffer, count = 180) {
+  const peaks = new Array<number>(count).fill(0);
+  const bucketSize = Math.max(1, buffer.length / count);
+  for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+    const data = buffer.getChannelData(channel);
+    for (let bucket = 0; bucket < count; bucket += 1) {
+      const start = Math.floor(bucket * bucketSize);
+      const end = Math.min(data.length, Math.floor((bucket + 1) * bucketSize));
+      const step = Math.max(1, Math.floor((end - start) / 64));
+      let peak = peaks[bucket];
+      for (let index = start; index < end; index += step) peak = Math.max(peak, Math.abs(data[index]));
+      peaks[bucket] = peak;
+    }
+  }
+  const maximum = Math.max(0.001, ...peaks);
+  return peaks.map((peak) => Math.max(0.03, peak / maximum));
+}
+
 export function SoundLab({ sound, onClose, onNotice }: Props) {
   const [settings, setSettings] = useState<SoundLabSettings>(defaultSettings);
   const [workspace, setWorkspace] = useState<Workspace>("tone");
@@ -294,11 +307,10 @@ export function SoundLab({ sound, onClose, onNotice }: Props) {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [playing, setPlaying] = useState(false);
-  const [progress, setProgress] = useState(0);
+  const [waveformPeaks, setWaveformPeaks] = useState<number[]>([]);
   const [exporting, setExporting] = useState(false);
   const [exported, setExported] = useState<SoundLabExport | null>(null);
   const [phaseCorrelation, setPhaseCorrelation] = useState(1);
-  const [labAnalyser, setLabAnalyser] = useState<AnalyserNode | null>(null);
   const contextRef = useRef<AudioContext | null>(null);
   const bufferRef = useRef<AudioBuffer | null>(null);
   const sourceRef = useRef<AudioBufferSourceNode | null>(null);
@@ -310,13 +322,28 @@ export function SoundLab({ sound, onClose, onNotice }: Props) {
   const comparisonRef = useRef(comparison);
   const analysisRef = useRef<AnalysisGraph | null>(null);
   const correlationFrameRef = useRef(0);
-  const lastProgressUpdateRef = useRef(0);
   const resumeAfterSeekRef = useRef(false);
   const refreshTimerRef = useRef<number | null>(null);
+  const waveformRef = useRef<WaveformHandle | null>(null);
+  const seekRef = useRef<HTMLInputElement | null>(null);
+  const timeRef = useRef<HTMLSpanElement | null>(null);
 
   settingsRef.current = settings;
   comparisonRef.current = comparison;
-  progressRef.current = progress;
+
+  const syncProgress = useCallback((nextProgress: number) => {
+    const safeProgress = Math.max(0, Math.min(1, nextProgress));
+    progressRef.current = safeProgress;
+    waveformRef.current?.setProgress(safeProgress);
+    if (seekRef.current) {
+      seekRef.current.value = String(Math.round(safeProgress * 1000));
+      seekRef.current.style.background = `linear-gradient(90deg, #7968ee 0 ${safeProgress * 100}%, #243441 ${safeProgress * 100}% 100%)`;
+    }
+    if (timeRef.current) {
+      const duration = bufferRef.current?.duration || sound.duration || 0;
+      timeRef.current.textContent = `${formatLabTime(safeProgress * duration)} / ${formatLabTime(duration)}`;
+    }
+  }, [sound.duration]);
 
   const stopSource = useCallback((reset = false) => {
     if (refreshTimerRef.current) window.clearTimeout(refreshTimerRef.current);
@@ -332,15 +359,15 @@ export function SoundLab({ sound, onClose, onNotice }: Props) {
     }
     setPlaying(false);
     analysisRef.current = null;
-    setLabAnalyser(null);
-    if (reset) setProgress(0);
-  }, []);
+    if (reset) syncProgress(0);
+  }, [syncProgress]);
 
   useEffect(() => {
     let cancelled = false;
     stopSource(true);
     setLoading(true);
     setLoadError("");
+    setWaveformPeaks([]);
     setExported(null);
     const context = new AudioContext();
     contextRef.current = context;
@@ -353,6 +380,8 @@ export function SoundLab({ sound, onClose, onNotice }: Props) {
       .then((buffer) => {
         if (!cancelled) {
           bufferRef.current = buffer;
+          setWaveformPeaks(extractWaveformPeaks(buffer));
+          syncProgress(0);
         }
       })
       .catch((error) => {
@@ -370,7 +399,7 @@ export function SoundLab({ sound, onClose, onNotice }: Props) {
       void context.close();
       if (contextRef.current === context) contextRef.current = null;
     };
-  }, [onNotice, sound.path, stopSource]);
+  }, [onNotice, sound.path, stopSource, syncProgress]);
 
   const startAudition = useCallback(async (mode = comparisonRef.current, offsetRatio = progressRef.current) => {
     const context = contextRef.current;
@@ -385,27 +414,21 @@ export function SoundLab({ sound, onClose, onNotice }: Props) {
       ? connectAnalysis(context, source)
       : connectProcessedGraph(context, source, settingsRef.current, buffer.numberOfChannels);
     analysisRef.current = analysis;
-    setLabAnalyser(analysis.spectrum);
     sourceRef.current = source;
     startOffsetRef.current = offset;
     startedAtRef.current = context.currentTime;
-    lastProgressUpdateRef.current = 0;
     source.onended = () => {
       if (sourceRef.current !== source) return;
       sourceRef.current = null;
       setPlaying(false);
-      setProgress(0);
+      syncProgress(0);
     };
     source.start(0, offset);
     setPlaying(true);
-    const tick = (timestamp: number) => {
+    const tick = () => {
       if (sourceRef.current !== source) return;
       const next = Math.min(1, (startOffsetRef.current + context.currentTime - startedAtRef.current) / buffer.duration);
-      if (timestamp - lastProgressUpdateRef.current >= 80 || next >= 1) {
-        lastProgressUpdateRef.current = timestamp;
-        progressRef.current = next;
-        setProgress(next);
-      }
+      syncProgress(next);
       correlationFrameRef.current += 1;
       if (correlationFrameRef.current % 15 === 0) {
         if (buffer.numberOfChannels === 1 && (mode === "original" || !settingsRef.current.monoStereoize)) {
@@ -430,7 +453,7 @@ export function SoundLab({ sound, onClose, onNotice }: Props) {
       animationRef.current = requestAnimationFrame(tick);
     };
     animationRef.current = requestAnimationFrame(tick);
-  }, [stopSource]);
+  }, [stopSource, syncProgress]);
 
   const toggleAudition = useCallback(() => {
     if (playing) stopSource();
@@ -485,9 +508,7 @@ export function SoundLab({ sound, onClose, onNotice }: Props) {
   };
 
   const setSeekProgress = (value: number) => {
-    const next = Math.max(0, Math.min(1, value));
-    progressRef.current = next;
-    setProgress(next);
+    syncProgress(value);
   };
 
   const beginSeek = () => {
@@ -549,11 +570,16 @@ export function SoundLab({ sound, onClose, onNotice }: Props) {
         <main className="lab-console">
           <div className="lab-visual">
             <div className={`lab-orb ${playing ? "active" : ""}`}><i/><i/><i/></div>
-            <Spectrum analyser={labAnalyser} active={playing} className="lab-spectrum"/>
+            <Waveform ref={waveformRef} peaks={waveformPeaks} progress={0} loading={loading} disabled={loading || !!loadError} className="lab-waveform" onSeek={(next) => {
+              const resume = playing;
+              if (playing) stopSource();
+              syncProgress(next);
+              if (resume) void startAudition(comparisonRef.current, next);
+            }}/>
             {loading || loadError ? <span className="lab-analysis-state">{loading ? "正在解析音频…" : loadError}</span> : null}
-            <input className="lab-seek" style={{ background: `linear-gradient(90deg, #7968ee 0 ${progress * 100}%, #243441 ${progress * 100}% 100%)` }} type="range" min={0} max={1000} step={1} value={Math.round(progress * 1000)} disabled={loading || !!loadError} aria-label="试听进度" onPointerDown={beginSeek} onPointerUp={finishSeek} onPointerCancel={finishSeek} onChange={(event) => setSeekProgress(Number(event.target.value) / 1000)}/>
+            <input ref={seekRef} className="lab-seek" type="range" min={0} max={1000} step={1} defaultValue={0} disabled={loading || !!loadError} aria-label="试听进度" onPointerDown={beginSeek} onPointerUp={finishSeek} onPointerCancel={finishSeek} onChange={(event) => setSeekProgress(Number(event.target.value) / 1000)}/>
           </div>
-          <div className="lab-transport"><button className="lab-play" disabled={loading || !!loadError} onClick={toggleAudition}>{playing ? "Ⅱ 暂停" : "▶ 试听"}</button><div className="ab-switch" aria-label="处理前后对比"><button aria-pressed={comparison === "original"} className={comparison === "original" ? "active" : ""} onClick={() => switchComparison("original")}>A 原声</button><button aria-pressed={comparison === "processed"} className={comparison === "processed" ? "active" : ""} onClick={() => switchComparison("processed")}>B 处理后</button></div><button className="apply-preview" disabled={loading || !!loadError} onClick={() => void startAudition("processed", progressRef.current)}>应用并试听</button><span>{formatLabTime(progress * (bufferRef.current?.duration || sound.duration || 0))} / {formatLabTime(bufferRef.current?.duration || sound.duration || 0)}</span></div>
+          <div className="lab-transport"><button className="lab-play" disabled={loading || !!loadError} onClick={toggleAudition}>{playing ? "Ⅱ 暂停" : "▶ 试听"}</button><div className="ab-switch" aria-label="处理前后对比"><button aria-pressed={comparison === "original"} className={comparison === "original" ? "active" : ""} onClick={() => switchComparison("original")}>A 原声</button><button aria-pressed={comparison === "processed"} className={comparison === "processed" ? "active" : ""} onClick={() => switchComparison("processed")}>B 处理后</button></div><button className="apply-preview" disabled={loading || !!loadError} onClick={() => void startAudition("processed", progressRef.current)}>应用并试听</button><span ref={timeRef}>{formatLabTime(0)} / {formatLabTime(sound.duration || 0)}</span></div>
           {workspace === "tone" ? <div className="lab-modules">
             <section><header><span>EQ</span><strong>三段均衡</strong></header><Slider label="低频 160 Hz" value={settings.lowGainDb} min={-18} max={18} step={0.5} suffix=" dB" onChange={(value) => update("lowGainDb", value)}/><Slider label="中频 1.4 kHz" value={settings.midGainDb} min={-18} max={18} step={0.5} suffix=" dB" onChange={(value) => update("midGainDb", value)}/><Slider label="高频 6.5 kHz" value={settings.highGainDb} min={-18} max={18} step={0.5} suffix=" dB" onChange={(value) => update("highGainDb", value)}/></section>
             <section><header><span>SPACE</span><strong>空间与延迟</strong></header><Slider label="混响量" value={settings.reverbMix} min={0} max={1} step={0.01} suffix="" onChange={(value) => update("reverbMix", value)}/><Slider label="延迟量" value={settings.delayMix} min={0} max={1} step={0.01} suffix="" onChange={(value) => update("delayMix", value)}/><Slider label="延迟时间" value={settings.delayMs} min={30} max={900} step={1} suffix=" ms" onChange={(value) => update("delayMs", value)}/><Slider label="反馈" value={settings.delayFeedback} min={0} max={0.88} step={0.01} suffix="" onChange={(value) => update("delayFeedback", value)}/></section>

@@ -1,6 +1,6 @@
 [package]
 name = "sound-island"
-version = "0.5.1"
+version = "0.6.0"
 description = "Local-first sound effects library manager"
 authors = ["Sound Island contributors"]
 license = "MIT"
