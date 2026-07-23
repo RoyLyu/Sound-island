@@ -16,11 +16,17 @@ function SpectrumView({ analyser, active, className = "", detailed = false }: Pr
     const context = canvas.getContext("2d");
     if (!context) return;
     let frame = 0;
+    let lastDrawnAt = 0;
     const bins = new Uint8Array(analyser?.frequencyBinCount ?? 64);
-    const preciseBins = new Float32Array(analyser?.frequencyBinCount ?? 64);
+    const samples = new Uint8Array(analyser?.fftSize ?? 128);
 
-    const draw = () => {
-      const ratio = Math.min(2, window.devicePixelRatio || 1);
+    const draw = (timestamp = 0) => {
+      if (active && timestamp - lastDrawnAt < 40) {
+        frame = requestAnimationFrame(draw);
+        return;
+      }
+      lastDrawnAt = timestamp;
+      const ratio = Math.min(1.5, window.devicePixelRatio || 1);
       const width = Math.max(1, Math.floor(canvas.clientWidth * ratio));
       const height = Math.max(1, Math.floor(canvas.clientHeight * ratio));
       if (canvas.width !== width || canvas.height !== height) {
@@ -52,7 +58,7 @@ function SpectrumView({ analyser, active, className = "", detailed = false }: Pr
           context.lineTo(width, y);
           context.stroke();
         }
-        if (analyser && active) analyser.getFloatFrequencyData(preciseBins);
+        if (analyser && active) analyser.getByteFrequencyData(bins);
         const plotHeight = height - 17 * ratio;
         const gradient = context.createLinearGradient(0, 0, width, 0);
         gradient.addColorStop(0, "rgba(84, 220, 209, .82)");
@@ -61,24 +67,25 @@ function SpectrumView({ analyser, active, className = "", detailed = false }: Pr
         context.strokeStyle = gradient;
         context.lineWidth = 1.35 * ratio;
         context.beginPath();
-        for (let x = 0; x < width; x += ratio) {
-          const frequency = minFrequency * (maxFrequency / minFrequency) ** (x / width);
+        const pointCount = Math.min(160, Math.max(48, Math.floor(width / (4 * ratio))));
+        for (let point = 0; point < pointCount; point += 1) {
+          const x = point / (pointCount - 1) * width;
+          const frequency = minFrequency * (maxFrequency / minFrequency) ** (point / (pointCount - 1));
           const sourceIndex = Math.min(
-            preciseBins.length - 1,
-            Math.max(0, Math.round(frequency / maxFrequency * preciseBins.length)),
+            bins.length - 1,
+            Math.max(0, Math.round(frequency / maxFrequency * bins.length)),
           );
-          const decibels = active ? preciseBins[sourceIndex] : -100;
-          const normalized = Math.max(0, Math.min(1, (decibels + 100) / 90));
+          const normalized = active ? bins[sourceIndex] / 255 : 0;
           const y = plotHeight - normalized * plotHeight;
-          if (x === 0) context.moveTo(x, y);
+          if (point === 0) context.moveTo(x, y);
           else context.lineTo(x, y);
         }
         context.stroke();
-        frame = requestAnimationFrame(draw);
+        if (active) frame = requestAnimationFrame(draw);
         return;
       }
-      if (analyser && active) analyser.getByteFrequencyData(bins);
-      const count = Math.min(48, bins.length);
+      if (analyser && active) analyser.getByteTimeDomainData(samples);
+      const count = Math.min(64, samples.length);
       const gap = 1.6 * ratio;
       const barWidth = Math.max(1, width / count - gap);
       const gradient = context.createLinearGradient(0, height, 0, 0);
@@ -87,19 +94,19 @@ function SpectrumView({ analyser, active, className = "", detailed = false }: Pr
       gradient.addColorStop(1, "rgba(193, 180, 255, .96)");
       context.fillStyle = gradient;
       for (let index = 0; index < count; index += 1) {
-        const sourceIndex = Math.floor((index / count) ** 1.65 * bins.length);
-        const liveValue = bins[Math.min(bins.length - 1, sourceIndex)] / 255;
-        const value = active ? liveValue : 0.025 + Math.sin(index * 0.71) * 0.01;
-        const barHeight = Math.max(1.2 * ratio, value * height * 0.86);
-        context.fillRect(index * (barWidth + gap), height - barHeight, barWidth, barHeight);
+        const sourceIndex = Math.floor(index / count * samples.length);
+        const liveValue = Math.abs(samples[Math.min(samples.length - 1, sourceIndex)] - 128) / 128;
+        const value = active ? liveValue : 0.012 + Math.sin(index * 0.71) * 0.006;
+        const barHeight = Math.max(1.2 * ratio, value * height * 0.82);
+        context.fillRect(index * (barWidth + gap), (height - barHeight) / 2, barWidth, barHeight);
       }
-      frame = requestAnimationFrame(draw);
+      if (active) frame = requestAnimationFrame(draw);
     };
-    frame = requestAnimationFrame(draw);
+    draw();
     return () => cancelAnimationFrame(frame);
   }, [active, analyser, detailed]);
 
-  return <canvas ref={canvasRef} className={`spectrum ${detailed ? "detailed" : ""} ${className}`.trim()} aria-label={detailed ? "高精度实时频谱" : "实时频谱"}/>;
+  return <canvas ref={canvasRef} className={`spectrum ${detailed ? "detailed" : ""} ${className}`.trim()} aria-label={detailed ? "轻量实时频谱" : "轻量实时电平"}/>;
 }
 
 export const Spectrum = memo(SpectrumView);

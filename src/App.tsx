@@ -220,14 +220,19 @@ export default function App() {
       return;
     }
     setWaveformLoading(true);
-    void getWaveform(selected.path).then((peaks) => {
-      if (!cancelled) setWaveform(peaks);
-    }).catch(() => {
-      if (!cancelled) setWaveform([]);
-    }).finally(() => {
-      if (!cancelled) setWaveformLoading(false);
-    });
-    return () => { cancelled = true; };
+    const timer = window.setTimeout(() => {
+      void getWaveform(selected.path).then((peaks) => {
+        if (!cancelled) setWaveform(peaks);
+      }).catch(() => {
+        if (!cancelled) setWaveform([]);
+      }).finally(() => {
+        if (!cancelled) setWaveformLoading(false);
+      });
+    }, 120);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, [desktop, selected?.path]);
 
   const stopAudio = useCallback(() => {
@@ -263,7 +268,7 @@ export default function App() {
         const context = new AudioContext();
         const source = context.createMediaElementSource(audio);
         const analyser = context.createAnalyser();
-        analyser.fftSize = 8192;
+        analyser.fftSize = 1024;
         analyser.minDecibels = -100;
         analyser.maxDecibels = -10;
         analyser.smoothingTimeConstant = 0.72;
@@ -564,7 +569,7 @@ export default function App() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div className="brand"><div className="brand-mark"><i/><i/><i/><i/><i/></div><div><strong>声屿</strong><small>SOUND ISLAND · 0.5</small></div></div>
+        <div className="brand"><div className="brand-mark"><i/><i/><i/><i/><i/></div><div><strong>声屿</strong><small>SOUND ISLAND · 0.5.1</small></div></div>
         <label className="search-box"><Icon name="search" size={18}/><span className="global-search-label">全库</span><input ref={searchInputRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索全部已导入音频：原名、中文显示名、分类、标签与路径…"/>{query ? <button onClick={() => setQuery("")} aria-label="清空"><Icon name="close" size={14}/></button> : null}<span className="search-engine">FTS5</span><kbd>TAB</kbd></label>
         <div className="status-area"><button className="lab-top" disabled={!selected} onClick={() => { stopAudio(); setSoundLabOpen(true); }} title={selected ? "将当前选中声音送入声音实验室" : "请先选择一个声音"}><Icon name="lab" size={16}/>声音实验室</button><div className="privacy-pill"><i className={desktop ? "online" : "offline"}/><span><strong>{desktop ? "本地智能在线" : "界面预览"}</strong><small>{stats.total.toLocaleString()} 个音频 · 零上传</small></span></div><button className="add-top" onClick={addLibrary}><Icon name="plus" size={16}/>添加素材库</button></div>
       </header>
@@ -615,7 +620,7 @@ export default function App() {
           {selected.tags.length ? <section className="tag-section"><label>语义标签</label><div>{selected.tags.map((tag) => <button key={tag} onClick={() => setQuery(tag)}>{tag}</button>)}</div></section> : null}
           <section className="path-section"><label>真实路径</label><p title={selected.path}>{selected.path}</p></section>
           <div className="inspector-actions"><button className="primary" onClick={() => void locate(selected)}><Icon name="locate" size={16}/>定位原文件</button><button onClick={findSimilar}><Icon name="similar" size={15}/>找相似</button><button className={selected.favorite ? "active" : ""} onClick={() => void toggleFavorite(selected)}><Icon name="heart" size={16}/>{selected.favorite ? "已收藏" : "收藏"}</button></div>
-        </> : <div className="no-selection"><Icon name="info" size={26}/><strong>选择一个声音</strong><p>这里会显示高精度频谱、中文别名、分类和规格。</p></div>}
+        </> : <div className="no-selection"><Icon name="info" size={26}/><strong>选择一个声音</strong><p>这里会显示轻量频谱、中文别名、分类和规格。</p></div>}
       </aside>
 
       <section className="player">

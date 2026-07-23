@@ -18,15 +18,15 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 使用独立 bundle identifier 构建 QA 应用，避免读写正式版数据库。在 1280 × 760 窗口至少验证：
 
-- 搜索、选择、Space 试听、波形与实时频谱；
+- 搜索、选择、Space 试听、波形与轻量实时频谱；
 - 输入搜索词后结果来自全部素材库，不受当前分类或文件夹筛选影响；
 - 分类二次点击会收回并取消选择，母文件夹能展示任意深度的后代目录；
 - 拖动调整素材库顺序后重启应用，顺序保持不变；
-- 底部只显示波形，右侧详情显示高精度实时频谱；
+- 底部只显示波形，右侧详情显示限帧轻量实时频谱；
 - `F` 收藏、`Z` 撤回、`Tab` 搜索、`Cmd/Ctrl + E` 导出；
 - 中文显示名只读取原始音频名，真实路径和硬盘文件名不变；
 - 拖出音频使用 copy 模式；
-- 声音实验室左侧可进入拓宽、单声道立体化、空间/遮挡，验证 A/B、相位相关度和 24-bit WAV 导出；
+- 声音实验室左侧用统一卡片进入拓宽、单声道立体化、空间/遮挡，验证拖动试听进度、A/B、相位相关度和 24-bit WAV 导出；
 - 导入一个伪造扩展名或损坏音频，确认扫描报告拦截且搜索结果中不存在；
 - 导出文件可由系统音频工具读取，源文件哈希保持不变。
 
@@ -44,6 +44,8 @@ rg -n '/Users/|/Volumes/' --glob '!docs/release-workflow.md' --glob '!package-lo
 
 ## 4. GitHub Release
 
-合并到 `main` 后创建 `app-vX.Y.Z` 标签并推送。`.github/workflows/release.yml` 会先执行质量门禁，再分别生成 Apple Silicon macOS、Intel macOS 和 Windows NSIS 安装包并发布到同一个 Release。
+合并到 `main` 后创建全新的 `app-vX.Y.Z` 标签并推送。`.github/workflows/release.yml` 只响应标签推送，先执行质量门禁，再分别生成 Apple Silicon macOS、Intel macOS 和 Windows NSIS 安装包并发布到同一个 Release。
+
+不要对同一版本同时手动触发发布和推送标签，也不要复用已经存在的发布标签；否则同名安装包会被 GitHub 判定为 `ReleaseAsset already_exists`。修复版本应递增补丁号并创建新标签。
 
 当前公开构建为 ad-hoc 签名，尚未经过 Apple notarization。正式面向大众分发前需配置 Developer ID、notarization 与 Windows 代码签名。
