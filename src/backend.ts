@@ -38,6 +38,10 @@ export async function removeLibrary(path: string) {
   return invoke<void>("remove_library", { path });
 }
 
+export async function reorderLibraries(paths: string[]) {
+  return invoke<void>("reorder_libraries", { paths });
+}
+
 export async function revealSound(path: string) {
   await invoke<void>("reveal_in_file_manager", { path });
 }
