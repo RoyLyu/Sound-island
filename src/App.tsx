@@ -21,8 +21,8 @@ import {
 } from "./backend";
 import type { Library, LibraryStats, ScanProgress, Sound, SoundNameUpdate } from "./types";
 import { SoundLab } from "./SoundLab";
-import { Spectrum } from "./Spectrum";
 import { Waveform } from "./Waveform";
+import type { WaveformHandle } from "./Waveform";
 
 const categories = [
   ["全部声音", "◌"], ["环境 Ambience", "≈"], ["拟音 Foley", "◍"],
@@ -120,7 +120,6 @@ export default function App() {
   const [scanning, setScanning] = useState<ScanProgress | null>(null);
   const [toast, setToast] = useState("");
   const [playing, setPlaying] = useState(false);
-  const [progress, setProgress] = useState(0);
   const [volume, setVolume] = useState(0.8);
   const [autoAdvance, setAutoAdvance] = useState(true);
   const [loopPlayback, setLoopPlayback] = useState(false);
@@ -130,9 +129,10 @@ export default function App() {
   const [nameDraft, setNameDraft] = useState("");
   const [translating, setTranslating] = useState(false);
   const [soundLabOpen, setSoundLabOpen] = useState(false);
-  const [mainAnalyser, setMainAnalyser] = useState<AnalyserNode | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
+  const playbackAnimationRef = useRef<number | null>(null);
+  const playerWaveformRef = useRef<WaveformHandle | null>(null);
+  const playerElapsedRef = useRef<HTMLSpanElement | null>(null);
   const toastTimer = useRef<number | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const soundsRef = useRef<Sound[]>([]);
@@ -154,6 +154,33 @@ export default function App() {
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
     toastTimer.current = window.setTimeout(() => setToast(""), 2800);
   }, []);
+
+  const syncPlayerProgress = useCallback((nextProgress: number, audio?: HTMLAudioElement | null) => {
+    const safeProgress = Math.max(0, Math.min(1, nextProgress));
+    playerWaveformRef.current?.setProgress(safeProgress);
+    if (playerElapsedRef.current) {
+      const duration = audio?.duration || selectedRef.current?.duration || 0;
+      playerElapsedRef.current.textContent = formatTime(duration * safeProgress);
+    }
+  }, []);
+
+  const stopPlayerAnimation = useCallback(() => {
+    if (playbackAnimationRef.current != null) cancelAnimationFrame(playbackAnimationRef.current);
+    playbackAnimationRef.current = null;
+  }, []);
+
+  const startPlayerAnimation = useCallback((audio: HTMLAudioElement) => {
+    stopPlayerAnimation();
+    const update = () => {
+      if (audioRef.current !== audio || audio.paused) {
+        playbackAnimationRef.current = null;
+        return;
+      }
+      syncPlayerProgress(audio.duration ? audio.currentTime / audio.duration : 0, audio);
+      playbackAnimationRef.current = requestAnimationFrame(update);
+    };
+    playbackAnimationRef.current = requestAnimationFrame(update);
+  }, [stopPlayerAnimation, syncPlayerProgress]);
 
   const refreshStats = useCallback(async () => {
     if (desktop) setStats(await getStats());
@@ -205,10 +232,10 @@ export default function App() {
     audio.preservesPitch = false;
   }, [loopPlayback, pitchSemitones]);
   useEffect(() => () => {
+    stopPlayerAnimation();
     audioRef.current?.pause();
     if (audioRef.current) audioRef.current.src = "";
-    void audioContextRef.current?.close();
-  }, []);
+  }, [stopPlayerAnimation]);
   useEffect(() => {
     setNameDraft(selected?.displayName ?? "");
   }, [selected?.path, selected?.displayName]);
@@ -236,10 +263,13 @@ export default function App() {
   }, [desktop, selected?.path]);
 
   const stopAudio = useCallback(() => {
-    audioRef.current?.pause();
+    stopPlayerAnimation();
+    const audio = audioRef.current;
+    audio?.pause();
+    if (audio) audio.currentTime = 0;
     setPlaying(false);
-    setProgress(0);
-  }, []);
+    syncPlayerProgress(0, audio);
+  }, [stopPlayerAnimation, syncPlayerProgress]);
 
   const selectSound = useCallback((sound: Sound) => {
     if (sound.path !== selectedRef.current?.path) stopAudio();
@@ -255,50 +285,28 @@ export default function App() {
     let audio = audioRef.current;
     if (!audio || audio.dataset.path !== sound.path) {
       audio?.pause();
-      void audioContextRef.current?.close();
-      audioContextRef.current = null;
-      setMainAnalyser(null);
       audio = new Audio(audioSource(sound.path));
       audio.dataset.path = sound.path;
       audio.volume = volume;
       audio.loop = loopPlayback;
       audio.playbackRate = 2 ** (pitchSemitones / 12);
       audio.preservesPitch = false;
-      try {
-        const context = new AudioContext();
-        const source = context.createMediaElementSource(audio);
-        const analyser = context.createAnalyser();
-        analyser.fftSize = 1024;
-        analyser.minDecibels = -100;
-        analyser.maxDecibels = -10;
-        analyser.smoothingTimeConstant = 0.72;
-        source.connect(analyser).connect(context.destination);
-        audioContextRef.current = context;
-        setMainAnalyser(analyser);
-      } catch {
-        // Audition must still work on a WebView that cannot expose Web Audio analysis.
-        audio = new Audio(audioSource(sound.path));
-        audio.dataset.path = sound.path;
-        audio.volume = volume;
-        audio.loop = loopPlayback;
-        audio.playbackRate = 2 ** (pitchSemitones / 12);
-        audio.preservesPitch = false;
-        audioContextRef.current = null;
-        setMainAnalyser(null);
-      }
-      audio.ontimeupdate = () => setProgress(audio!.duration ? audio!.currentTime / audio!.duration : 0);
+      audio.ontimeupdate = () => {
+        if (audio!.paused) syncPlayerProgress(audio!.duration ? audio!.currentTime / audio!.duration : 0, audio);
+      };
       audio.onended = () => {
+        stopPlayerAnimation();
         setPlaying(false);
-        setProgress(0);
+        syncPlayerProgress(0, audio);
         if (autoAdvanceRef.current) playRelativeRef.current(1, true);
       };
       audio.onerror = () => showToast("无法播放：文件可能已移动或格式不受系统支持");
       audioRef.current = audio;
     }
     if (audio.paused || forcePlay) {
-      await audioContextRef.current?.resume();
       await audio.play();
       setPlaying(true);
+      startPlayerAnimation(audio);
       void recordSoundPlayed(sound.path);
       const firstPlay = !sound.lastPlayedAt;
       setSounds((current) => current.map((item) => item.path === sound.path ? { ...item, lastPlayedAt: Date.now(), playCount: item.playCount + 1 } : item));
@@ -306,9 +314,11 @@ export default function App() {
       if (firstPlay) setStats((current) => ({ ...current, smartCollections: { ...current.smartCollections, recently_played: (current.smartCollections.recently_played ?? 0) + 1 } }));
     } else {
       audio.pause();
+      stopPlayerAnimation();
+      syncPlayerProgress(audio.duration ? audio.currentTime / audio.duration : 0, audio);
       setPlaying(false);
     }
-  }, [loopPlayback, pitchSemitones, showToast, stopAudio, volume]);
+  }, [loopPlayback, pitchSemitones, showToast, startPlayerAnimation, stopAudio, stopPlayerAnimation, syncPlayerProgress, volume]);
 
   const playRelative = useCallback((step: number, shouldPlay = false) => {
     const list = soundsRef.current;
@@ -518,8 +528,8 @@ export default function App() {
   const seek = useCallback((next: number) => {
     const audio = audioRef.current;
     if (audio?.duration) audio.currentTime = next * audio.duration;
-    setProgress(next);
-  }, []);
+    syncPlayerProgress(next, audio);
+  }, [syncPlayerProgress]);
 
   const findSimilar = () => {
     const sound = selectedRef.current;
@@ -569,7 +579,7 @@ export default function App() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div className="brand"><div className="brand-mark"><i/><i/><i/><i/><i/></div><div><strong>声屿</strong><small>SOUND ISLAND · 0.5.1</small></div></div>
+        <div className="brand"><div className="brand-mark"><i/><i/><i/><i/><i/></div><div><strong>声屿</strong><small>SOUND ISLAND · 0.6.0</small></div></div>
         <label className="search-box"><Icon name="search" size={18}/><span className="global-search-label">全库</span><input ref={searchInputRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索全部已导入音频：原名、中文显示名、分类、标签与路径…"/>{query ? <button onClick={() => setQuery("")} aria-label="清空"><Icon name="close" size={14}/></button> : null}<span className="search-engine">FTS5</span><kbd>TAB</kbd></label>
         <div className="status-area"><button className="lab-top" disabled={!selected} onClick={() => { stopAudio(); setSoundLabOpen(true); }} title={selected ? "将当前选中声音送入声音实验室" : "请先选择一个声音"}><Icon name="lab" size={16}/>声音实验室</button><div className="privacy-pill"><i className={desktop ? "online" : "offline"}/><span><strong>{desktop ? "本地智能在线" : "界面预览"}</strong><small>{stats.total.toLocaleString()} 个音频 · 零上传</small></span></div><button className="add-top" onClick={addLibrary}><Icon name="plus" size={16}/>添加素材库</button></div>
       </header>
@@ -613,20 +623,20 @@ export default function App() {
       <aside className="inspector">
         <header><div><span>声音检视</span><strong>声音详情</strong></div><b>本地文件</b></header>
         {selected ? <>
-          <div className="file-card"><div className={`file-art spectrum-art ${playing ? "active" : ""}`}><span>{selectedFormat}</span><Spectrum analyser={mainAnalyser} active={playing && audioRef.current?.dataset.path === selected.path} detailed className="inspector-spectrum"/></div><strong>{soundTitle(selected)}</strong>{selected.displayName ? <small>原始文件名 · {selected.name}</small> : <small>{selected.libraryName}</small>}</div>
+          <div className="file-card"><strong>{soundTitle(selected)}</strong>{selected.displayName ? <small>原始文件名 · {selected.name}</small> : <small>{selected.libraryName}</small>}</div>
           <section className="name-lab"><div className="section-title"><span><Icon name="spark" size={13}/>中文显示名</span><em>仅本地索引</em></div><p>只翻译“{selected.name}”；真实路径与硬盘文件名始终不变。</p><label><input value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} placeholder="生成或输入中文显示名"/><button onClick={() => void saveNameDraft()} aria-label="保存显示名"><Icon name="edit" size={14}/></button></label><div className="name-actions"><button className="translate-button" disabled={translating} onClick={() => void translateSelected()}><Icon name="spark" size={14}/>{translating ? "生成中…" : "专业释义"}</button><button disabled={!selected.canUndoName} onClick={() => void undoName()}><Icon name="undo" size={14}/>撤回</button><button disabled={!selected.displayName} onClick={() => void restoreOriginalName()}>原名</button></div></section>
           <div className="classification"><label>智能分类</label><strong>{selected.category}</strong><span>{selected.subcategory}</span><p>由文件名与目录语义匹配，仅改变虚拟视图。</p></div>
           <dl><div><dt>时长</dt><dd className="mono">{formatTime(selected.duration)}</dd></div><div><dt>采样率</dt><dd>{selected.sampleRate ? `${selected.sampleRate / 1000} kHz` : "未读取"}</dd></div><div><dt>位深 / 声道</dt><dd>{selected.bitDepth ? `${selected.bitDepth} bit · ` : ""}{channelName(selected.channels)}</dd></div><div><dt>格式 / 大小</dt><dd>{selectedFormat} · {formatBytes(selected.fileSize)}</dd></div><div><dt>试听次数</dt><dd>{selected.playCount.toLocaleString()}</dd></div></dl>
           {selected.tags.length ? <section className="tag-section"><label>语义标签</label><div>{selected.tags.map((tag) => <button key={tag} onClick={() => setQuery(tag)}>{tag}</button>)}</div></section> : null}
           <section className="path-section"><label>真实路径</label><p title={selected.path}>{selected.path}</p></section>
           <div className="inspector-actions"><button className="primary" onClick={() => void locate(selected)}><Icon name="locate" size={16}/>定位原文件</button><button onClick={findSimilar}><Icon name="similar" size={15}/>找相似</button><button className={selected.favorite ? "active" : ""} onClick={() => void toggleFavorite(selected)}><Icon name="heart" size={16}/>{selected.favorite ? "已收藏" : "收藏"}</button></div>
-        </> : <div className="no-selection"><Icon name="info" size={26}/><strong>选择一个声音</strong><p>这里会显示轻量频谱、中文别名、分类和规格。</p></div>}
+        </> : <div className="no-selection"><Icon name="info" size={26}/><strong>选择一个声音</strong><p>这里会显示中文别名、分类和规格。</p></div>}
       </aside>
 
       <section className="player">
         <div className="now-playing"><button className={selected?.favorite ? "favorite active" : "favorite"} onClick={() => selected && void toggleFavorite(selected)}><Icon name="heart" size={16}/></button><span><small>正在试听</small><strong>{soundTitle(selected)}</strong><em>{selected ? `${selected.category} · ${selectedFormat}` : "添加素材库后开始试听"}</em></span></div>
         <button className="play-button" disabled={!selected} onClick={() => void togglePlay()} aria-label={playing ? "暂停" : "播放"}><Icon name={playing ? "pause" : "play"} size={22}/></button>
-        <div className="waveform-wrap"><div className="waveform-stage"><Waveform peaks={waveform} progress={progress} loading={waveformLoading} disabled={!selected} onSeek={seek}/></div><div><span className="mono">{formatTime((selected?.duration ?? 0) * progress)}</span><span className="mono">{formatTime(selected?.duration)}</span></div></div>
+        <div className="waveform-wrap"><div className="waveform-stage"><Waveform ref={playerWaveformRef} peaks={waveform} progress={0} loading={waveformLoading} disabled={!selected} onSeek={seek}/></div><div><span ref={playerElapsedRef} className="mono">{formatTime(0)}</span><span className="mono">{formatTime(selected?.duration)}</span></div></div>
         <div className="transport-tools"><button className={autoAdvance ? "active" : ""} onClick={() => { setAutoAdvance((value) => !value); setLoopPlayback(false); }} title="播放结束后自动试听下一条"><Icon name="next" size={15}/>连播</button><button className={loopPlayback ? "active" : ""} onClick={() => { setLoopPlayback((value) => !value); setAutoAdvance(false); }} title="循环当前声音"><Icon name="loop" size={14}/>循环</button><button className={pitchSemitones ? "active pitch-button" : "pitch-button"} onClick={cyclePitch} title="切换原速、降六半音、升六半音">音高 {pitchSemitones === 0 ? "原速" : `${pitchSemitones > 0 ? "+" : ""}${pitchSemitones}`}</button><button onClick={() => void exportSelected()} title="导出所选原始音频副本（Cmd/Ctrl + E）">导出 ⌘E</button><kbd>SPACE</kbd><div className="volume"><Icon name="volume" size={17}/><input aria-label="音量" type="range" min="0" max="1" step="0.01" value={volume} onChange={(event) => setVolume(Number(event.target.value))}/></div></div>
       </section>
 

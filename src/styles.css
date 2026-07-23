@@ -206,13 +206,6 @@ kbd { padding: 4px 7px; border: 1px solid #343c49; border-bottom-color: #485160;
 .inspector > header strong { margin-top: 3px; font-size: 11px; }
 .inspector > header b { padding: 4px 7px; border-radius: 5px; background: #123027; color: #61d9b1; font-size: 7px; }
 .file-card { padding: 14px 14px 12px; }
-.file-art { height: 106px; position: relative; display: grid; place-items: center; overflow: hidden; margin-bottom: 11px; border: 1px solid #2a3240; border-radius: 11px; background: radial-gradient(circle at 20% 25%, #7968ee32, transparent 38%), radial-gradient(circle at 80% 76%, #31b8bb1c, transparent 38%), #10151c; box-shadow: inset 0 1px #ffffff0a; }
-.file-art::before { content: ""; width: 130px; height: 130px; position: absolute; border: 1px solid #7968ee22; border-radius: 50%; box-shadow: 0 0 50px #7968ee1a; }
-.file-art.active::before { animation: signal-pulse 1.8s ease-out infinite; }
-@keyframes signal-pulse { 0% { transform: scale(.65); opacity: .8; } 100% { transform: scale(1.35); opacity: 0; } }
-.file-art > span { position: absolute; right: 9px; top: 9px; z-index: 2; padding: 3px 6px; border: 1px solid #2c3541; border-radius: 4px; background: #080a0ecf; color: #8c97a7; font: 7px ui-monospace, monospace; }
-.spectrum-art { height: 132px; display: block; padding: 9px; background: radial-gradient(circle at 18% 15%, #7968ee20, transparent 36%), #070d14; }
-.inspector-spectrum { width: auto; height: auto; position: absolute; inset: 12px 8px 7px; opacity: 1; mix-blend-mode: normal; }
 .file-card > strong, .file-card > small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-card > strong { color: #dde1e8; font: 600 10px ui-monospace, monospace; }
 .file-card > small { margin-top: 5px; color: #626e80; font-size: 8px; }
@@ -263,7 +256,6 @@ kbd { padding: 4px 7px; border: 1px solid #343c49; border-bottom-color: #485160;
 .play-button:disabled { opacity: .3; }
 .waveform-wrap { min-width: 0; }
 .waveform-stage { min-width: 0; position: relative; }
-.spectrum { display: block; pointer-events: none; }
 .waveform { width: 100%; height: 62px; position: relative; display: block; overflow: hidden; padding: 0; border: 1px solid #2a4253; border-radius: 9px; background: radial-gradient(circle at 50% 50%, #18303a55, transparent 70%), #060b12; box-shadow: inset 0 0 30px #0008, 0 0 24px #47e3d30a; cursor: crosshair; }
 .waveform:disabled { cursor: default; opacity: .58; }
 .waveform-grid { position: absolute; inset: 0; background: linear-gradient(90deg, transparent 24.8%, #30374455 25%, transparent 25.2%, transparent 49.8%, #30374455 50%, transparent 50.2%, transparent 74.8%, #30374455 75%, transparent 75.2%), linear-gradient(180deg, transparent 49.4%, #30374466 50%, transparent 50.6%); }
@@ -330,7 +322,12 @@ kbd { padding: 4px 7px; border: 1px solid #343c49; border-bottom-color: #485160;
 .lab-orb i { width: 3px; height: 26px; z-index: 1; border-radius: 3px; background: #a699ff; }
 .lab-orb i:nth-child(2) { height: 52px; background: #64e0d4; }
 .lab-orb i:nth-child(3) { height: 36px; }
-.lab-spectrum { width: auto; height: auto; position: absolute; inset: 17px 22px 18px 126px; opacity: 1; mix-blend-mode: normal; }
+.lab-waveform { height: 104px; margin-bottom: 14px; border: 0; background: transparent; box-shadow: none; }
+.lab-waveform .waveform-grid { opacity: .48; }
+.lab-waveform line { stroke-width: 1.4; }
+.lab-waveform line.pending { stroke: #385063; }
+.lab-waveform line.played { stroke: #7ce1d4; filter: drop-shadow(0 0 3px #52d9cb); }
+.lab-waveform .playhead { inset-block: 8px 13px; background: #d8fff9; box-shadow: 0 0 10px #62ded2; }
 .lab-analysis-state { position: absolute; right: 30px; bottom: 31px; left: 134px; z-index: 2; overflow: hidden; color: #8998aa; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .lab-seek { width: auto; height: 4px; position: absolute; right: 22px; bottom: 13px; left: 126px; z-index: 3; margin: 0; appearance: none; border-radius: 6px; background: #243441; cursor: pointer; }
 .lab-seek::-webkit-slider-thumb { width: 14px; height: 14px; appearance: none; border: 2px solid #d8fff9; border-radius: 50%; background: #63dfd2; box-shadow: 0 0 11px #5adfd2aa; }
@@ -442,6 +439,26 @@ kbd { padding: 4px 7px; border: 1px solid #343c49; border-bottom-color: #485160;
 .lab-modules > section > header span, .lab-slider em, .phase-meter, .phase-meter strong { font-size: 9px; }
 .lab-footer span, .lab-footer > div button { font-size: 8.5px; }
 .lab-footer strong, .export-button { font-size: 10px; }
+
+/* v0.6 Sound Lab readability: larger text and stronger contrast at the 1280×760 baseline. */
+.lab-header span, .lab-header-actions em, .lab-presets > label { font-size: 10px; }
+.lab-header p { color: #91a0b3; font-size: 11px; }
+.lab-presets > button strong { font-size: 12.5px; }
+.lab-presets > button small { color: #96a4b6; font-size: 10.5px; }
+.lab-safety b { font-size: 11px; }
+.lab-safety p { color: #91b5aa; font-size: 10.5px; }
+.lab-transport button { font-size: 11px; }
+.lab-transport > span { color: #aeb9c7; font-size: 11px; }
+.lab-modules > section > header span, .lab-slider em, .phase-meter, .phase-meter strong { font-size: 10px; }
+.lab-modules > section > header strong, .lab-slider b { font-size: 11.5px; }
+.lab-modules > section > p { color: #7d8b9d; font-size: 10px; }
+.lab-tool-editor > header span { font-size: 10px; }
+.lab-tool-editor > header strong { font-size: 16px; }
+.lab-tool-editor > header p { color: #9aa7b8; font-size: 11px; }
+.lab-option-grid button, .feature-toggle, .lab-switches button { font-size: 11px; }
+.signal-flow span { font-size: 10px; }
+.lab-footer span, .lab-footer > div button { font-size: 9.5px; }
+.lab-footer strong, .export-button { font-size: 11px; }
 
 @media (max-width: 1280px) {
   .app-shell { grid-template-columns: 218px minmax(500px, 1fr) 294px; }
