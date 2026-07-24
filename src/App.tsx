@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import {
   audioSource,
   chooseLibraryFolder,
+  copySoundToClipboard,
   dragSoundOutside,
   exportSelectedSound,
   getStats,
@@ -23,19 +24,13 @@ import type { Library, LibraryStats, ScanProgress, Sound, SoundNameUpdate } from
 import { SoundLab } from "./SoundLab";
 import { Waveform } from "./Waveform";
 import type { WaveformHandle } from "./Waveform";
-
-const categories = [
-  ["全部声音", "◌"], ["环境 Ambience", "≈"], ["拟音 Foley", "◍"],
-  ["硬音效 Hard FX", "◆"], ["界面 UI", "⌁"], ["生物 Creature", "◇"],
-  ["交通 Vehicles", "▱"], ["武器 Weapons", "⌖"], ["设计音 Design", "✦"], ["未分类", "·"],
-] as const;
+import { ucsCategories } from "./ucsCatalog";
 
 const smartCollections = [
   ["recently_played", "最近播放", "↺"],
 ] as const;
 
 const quickFilters = ["雨声", "脚步声", "摩擦声", "撞击声", "门窗", "车辆", "呼啸转场", "人群"];
-const pitchOptions = [0, -6, 6] as const;
 
 const emptyStats: LibraryStats = {
   total: 0,
@@ -70,6 +65,9 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
     lab: <><path d="M9 3v5l-4.5 8a3 3 0 0 0 2.6 4.5h9.8a3 3 0 0 0 2.6-4.5L15 8V3"/><path d="M8 13h8M8 3h8"/><circle cx="12" cy="17" r="1"/></>,
     chevron: <path d="m8 10 4 4 4-4"/>,
     drag: <><circle cx="8" cy="7" r="1" fill="currentColor"/><circle cx="8" cy="12" r="1" fill="currentColor"/><circle cx="8" cy="17" r="1" fill="currentColor"/><circle cx="16" cy="7" r="1" fill="currentColor"/><circle cx="16" cy="12" r="1" fill="currentColor"/><circle cx="16" cy="17" r="1" fill="currentColor"/></>,
+    copy: <><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></>,
+    up: <path d="m7 14 5-5 5 5"/>,
+    down: <path d="m7 10 5 5 5-5"/>,
   };
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
@@ -98,8 +96,35 @@ function channelName(count?: number | null) {
   return `${count} ch`;
 }
 
+function channelProfile(count?: number | null) {
+  if (count === 1) return { kind: "mono", label: "MONO", detail: "单声道", bars: 1 };
+  if (count === 2) return { kind: "stereo", label: "STEREO", detail: "L / R 立体声", bars: 2 };
+  if (count === 4) return { kind: "surround", label: "QUAD 4.0", detail: "四声道环绕", bars: 4 };
+  if (count === 6) return { kind: "surround", label: "SURROUND 5.1", detail: "L · C · R · Ls · Rs · LFE", bars: 6 };
+  if (count === 8) return { kind: "surround", label: "SURROUND 7.1", detail: "八声道环绕", bars: 8 };
+  if (count && count > 2) return { kind: "multichannel", label: `${count} CH`, detail: "多声道", bars: Math.min(count, 8) };
+  return { kind: "unknown", label: "CHANNELS —", detail: "声道信息未读取", bars: 0 };
+}
+
+function ChannelBadge({ channels, prominent = false }: { channels?: number | null; prominent?: boolean }) {
+  const profile = channelProfile(channels);
+  return <span className={`channel-badge ${profile.kind} ${prominent ? "prominent" : ""}`}>
+    <i>{Array.from({ length: profile.bars }, (_, index) => <b key={index}/>)}</i>
+    <span><strong>{profile.label}</strong><small>{profile.detail}</small></span>
+  </span>;
+}
+
+function ucsSubcategoryLabel(value: string) {
+  return value.split(" · ")[0];
+}
+
+function ucsCatId(value: string) {
+  return value.split(" · ")[1] ?? "";
+}
+
 const soundTitle = (sound: Sound | null) => sound?.displayName || sound?.name || "尚未选择声音";
 type UndoAction = { kind: "favorite"; path: string; previous: boolean } | { kind: "display-name"; path: string };
+type SoundMenu = { sound: Sound; x: number; y: number };
 
 export default function App() {
   const desktop = isDesktop();
@@ -114,7 +139,6 @@ export default function App() {
   const [activeLibrary, setActiveLibrary] = useState<string | null>(null);
   const [activeFolder, setActiveFolder] = useState<string | null>(null);
   const [expandedLibrary, setExpandedLibrary] = useState<string | null>(null);
-  const [draggingLibrary, setDraggingLibrary] = useState<string | null>(null);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [loading, setLoading] = useState(false);
   const [scanning, setScanning] = useState<ScanProgress | null>(null);
@@ -123,12 +147,12 @@ export default function App() {
   const [volume, setVolume] = useState(0.8);
   const [autoAdvance, setAutoAdvance] = useState(true);
   const [loopPlayback, setLoopPlayback] = useState(false);
-  const [pitchSemitones, setPitchSemitones] = useState<(typeof pitchOptions)[number]>(0);
   const [waveform, setWaveform] = useState<number[]>([]);
   const [waveformLoading, setWaveformLoading] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   const [translating, setTranslating] = useState(false);
   const [soundLabOpen, setSoundLabOpen] = useState(false);
+  const [soundMenu, setSoundMenu] = useState<SoundMenu | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const playbackAnimationRef = useRef<number | null>(null);
   const playerWaveformRef = useRef<WaveformHandle | null>(null);
@@ -143,11 +167,20 @@ export default function App() {
   const favoriteShortcutRef = useRef<() => void>(() => undefined);
   const undoShortcutRef = useRef<() => void>(() => undefined);
   const exportShortcutRef = useRef<() => void>(() => undefined);
+  const copyShortcutRef = useRef<() => void>(() => undefined);
   const undoStackRef = useRef<UndoAction[]>([]);
 
   soundsRef.current = sounds;
   selectedRef.current = selected;
   autoAdvanceRef.current = autoAdvance;
+
+  const categoryRows = useMemo(() => {
+    const rows: Array<readonly [string, string]> = ucsCategories.map(({ code, glyph }) => [code, glyph]);
+    if (!rows.some(([label]) => label === "待归类 / UNCATEGORIZED")) {
+      rows.push(["待归类 / UNCATEGORIZED", "·"] as const);
+    }
+    return rows;
+  }, []);
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -228,9 +261,7 @@ export default function App() {
     const audio = audioRef.current;
     if (!audio) return;
     audio.loop = loopPlayback;
-    audio.playbackRate = 2 ** (pitchSemitones / 12);
-    audio.preservesPitch = false;
-  }, [loopPlayback, pitchSemitones]);
+  }, [loopPlayback]);
   useEffect(() => () => {
     stopPlayerAnimation();
     audioRef.current?.pause();
@@ -289,8 +320,6 @@ export default function App() {
       audio.dataset.path = sound.path;
       audio.volume = volume;
       audio.loop = loopPlayback;
-      audio.playbackRate = 2 ** (pitchSemitones / 12);
-      audio.preservesPitch = false;
       audio.ontimeupdate = () => {
         if (audio!.paused) syncPlayerProgress(audio!.duration ? audio!.currentTime / audio!.duration : 0, audio);
       };
@@ -318,7 +347,7 @@ export default function App() {
       syncPlayerProgress(audio.duration ? audio.currentTime / audio.duration : 0, audio);
       setPlaying(false);
     }
-  }, [loopPlayback, pitchSemitones, showToast, startPlayerAnimation, stopAudio, stopPlayerAnimation, syncPlayerProgress, volume]);
+  }, [loopPlayback, showToast, startPlayerAnimation, stopAudio, stopPlayerAnimation, syncPlayerProgress, volume]);
 
   const playRelative = useCallback((step: number, shouldPlay = false) => {
     const list = soundsRef.current;
@@ -345,6 +374,11 @@ export default function App() {
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "e") {
       event.preventDefault();
       exportShortcutRef.current();
+      return;
+    }
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "c" && !isEditing && !soundLabOpen) {
+      event.preventDefault();
+      copyShortcutRef.current();
       return;
     }
     if (event.key === "Tab" && !event.shiftKey && !isEditing && !soundLabOpen) {
@@ -378,6 +412,18 @@ export default function App() {
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
   }, []);
+  useEffect(() => {
+    if (!soundMenu) return;
+    const close = () => setSoundMenu(null);
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("blur", close);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("blur", close);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [soundMenu]);
 
   const addLibrary = async () => {
     if (!desktop) { showToast("请在 Tauri 桌面应用中使用本地文件扫描"); return; }
@@ -429,6 +475,22 @@ export default function App() {
       const result = await exportSelectedSound(sound.path);
       if (result) showToast(`已导出副本：${result.bytesCopied.toLocaleString()} 字节，母文件未改变`);
     } catch (error) { showToast(`导出失败：${String(error)}`); }
+  };
+
+  const copySelected = async (sound = selectedRef.current) => {
+    if (!sound) { showToast("请先选择要复制的音频"); return; }
+    try {
+      await copySoundToClipboard(sound.path);
+      showToast("已复制音频文件，可直接粘贴到 Finder 或其他软件");
+    } catch (error) { showToast(`复制音频失败：${String(error)}`); }
+  };
+
+  const openSoundLab = (sound = selectedRef.current) => {
+    if (!sound) return;
+    stopAudio();
+    setSelected(sound);
+    setSoundMenu(null);
+    setSoundLabOpen(true);
   };
 
   const locate = async (sound: Sound) => {
@@ -514,6 +576,7 @@ export default function App() {
   favoriteShortcutRef.current = () => { const sound = selectedRef.current; if (sound) void toggleFavorite(sound); };
   undoShortcutRef.current = () => void undoLastAction();
   exportShortcutRef.current = () => void exportSelected();
+  copyShortcutRef.current = () => void copySelected();
 
   const beginExternalDrag = async (sound: Sound) => {
     if (!desktop) return;
@@ -541,7 +604,7 @@ export default function App() {
     setActiveCollection(null);
     setActiveCategory(sound.category);
     setActiveSubcategory(sound.subcategory);
-    showToast(`正在查找相似声音：${sound.subcategory.split(" / ")[0]}`);
+    showToast(`正在查找相似声音：${ucsSubcategoryLabel(sound.subcategory)}`);
   };
 
   const moveLibrary = async (sourcePath: string, targetPath: string) => {
@@ -563,25 +626,27 @@ export default function App() {
     }
   };
 
-  const libraryFolderCount = (library: Library) => library.childFolders.length;
-
-  const cyclePitch = () => {
-    setPitchSemitones((current) => pitchOptions[(pitchOptions.indexOf(current) + 1) % pitchOptions.length]);
+  const moveLibraryBy = (path: string, offset: number) => {
+    const index = stats.libraries.findIndex((library) => library.path === path);
+    const target = stats.libraries[index + offset];
+    if (index >= 0 && target) void moveLibrary(path, target.path);
   };
+
+  const libraryFolderCount = (library: Library) => library.childFolders.length;
 
   const selectedFormat = useMemo(() => selected?.extension.replace(".", "").toUpperCase() ?? "—", [selected?.extension]);
   const activeTitle = favoritesOnly
     ? "我的收藏"
     : activeCollection
       ? smartCollections.find(([key]) => key === activeCollection)?.[1] ?? "智能集合"
-      : activeSubcategory ?? activeCategory;
+      : activeSubcategory ? ucsSubcategoryLabel(activeSubcategory) : activeCategory;
 
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div className="brand"><div className="brand-mark"><i/><i/><i/><i/><i/></div><div><strong>声屿</strong><small>SOUND ISLAND · 0.6.0</small></div></div>
+        <div className="brand"><div className="brand-mark"><i/><i/><i/><i/><i/></div><div><strong>声屿</strong><small>SOUND ISLAND · 0.7.0</small></div></div>
         <label className="search-box"><Icon name="search" size={18}/><span className="global-search-label">全库</span><input ref={searchInputRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索全部已导入音频：原名、中文显示名、分类、标签与路径…"/>{query ? <button onClick={() => setQuery("")} aria-label="清空"><Icon name="close" size={14}/></button> : null}<span className="search-engine">FTS5</span><kbd>TAB</kbd></label>
-        <div className="status-area"><button className="lab-top" disabled={!selected} onClick={() => { stopAudio(); setSoundLabOpen(true); }} title={selected ? "将当前选中声音送入声音实验室" : "请先选择一个声音"}><Icon name="lab" size={16}/>声音实验室</button><div className="privacy-pill"><i className={desktop ? "online" : "offline"}/><span><strong>{desktop ? "本地智能在线" : "界面预览"}</strong><small>{stats.total.toLocaleString()} 个音频 · 零上传</small></span></div><button className="add-top" onClick={addLibrary}><Icon name="plus" size={16}/>添加素材库</button></div>
+        <div className="status-area"><button className="lab-top" disabled={!selected} onClick={() => openSoundLab()} title={selected ? "将当前选中声音送入声音实验室" : "请先选择一个声音"}><Icon name="lab" size={16}/>声音实验室</button><div className="privacy-pill"><i className={desktop ? "online" : "offline"}/><span><strong>{desktop ? "本地智能在线" : "界面预览"}</strong><small>{stats.total.toLocaleString()} 个音频 · 零上传</small></span></div><button className="add-top" onClick={addLibrary}><Icon name="plus" size={16}/>添加素材库</button></div>
       </header>
 
       <aside className="sidebar">
@@ -591,12 +656,24 @@ export default function App() {
           {smartCollections.map(([key, label, glyph]) => <button key={key} className={!favoritesOnly && activeCollection === key ? "active" : ""} onClick={() => { setFavoritesOnly(false); setActiveCollection(key); setActiveCategory("全部声音"); setActiveSubcategory(null); }}><span className="glyph">{glyph}</span><span>{label}</span><em>{(stats.smartCollections[key] ?? 0).toLocaleString()}</em></button>)}
         </nav>
         <nav className="nav-section category-nav">
-          <label><span>智能分类</span><em>{Object.keys(stats.categories).length}</em></label>
-          {categories.map(([label, glyph]) => <div className="category-group" key={label}><button className={!favoritesOnly && !activeCollection && activeCategory === label && !activeSubcategory ? "active" : ""} aria-expanded={label === "全部声音" ? undefined : expandedCategory === label} onClick={() => { const closing = label !== "全部声音" && expandedCategory === label; setFavoritesOnly(false); setActiveCollection(null); setActiveCategory(closing ? "全部声音" : label); setActiveSubcategory(null); setExpandedCategory(label === "全部声音" || closing ? null : label); }}><span className="glyph">{glyph}</span><span>{label}</span><span className="nav-count"><em>{(label === "全部声音" ? stats.total : stats.categories[label] ?? 0).toLocaleString()}</em>{label !== "全部声音" ? <i className={expandedCategory === label ? "expanded" : ""}><Icon name="chevron" size={11}/></i> : null}</span></button>{expandedCategory === label && label !== "全部声音" ? <div className="subcategory-list">{Object.entries(stats.subcategories[label] ?? {}).map(([subcategory, count]) => <button key={subcategory} className={activeSubcategory === subcategory ? "active" : ""} onClick={() => setActiveSubcategory(activeSubcategory === subcategory ? null : subcategory)}><span>{subcategory.split(" / ")[0]}</span><em>{count.toLocaleString()}</em></button>)}</div> : null}</div>)}
+          <label><span>UCS 分类系统</span><em>v8.2.1</em></label>
+          <div className="category-group"><button className={!favoritesOnly && !activeCollection && activeCategory === "全部声音" ? "active" : ""} onClick={() => { setFavoritesOnly(false); setActiveCollection(null); setActiveCategory("全部声音"); setActiveSubcategory(null); setExpandedCategory(null); }}><span className="glyph">◌</span><span>全部声音</span><span className="nav-count"><em>{stats.total.toLocaleString()}</em></span></button></div>
+          {categoryRows.map(([label, glyph]) => <div className="category-group" key={label}><button className={!favoritesOnly && !activeCollection && activeCategory === label && !activeSubcategory ? "active" : ""} aria-expanded={expandedCategory === label} onClick={() => { const closing = expandedCategory === label; setFavoritesOnly(false); setActiveCollection(null); setActiveCategory(closing ? "全部声音" : label); setActiveSubcategory(null); setExpandedCategory(closing ? null : label); }}><span className="glyph">{glyph}</span><span>{label}</span><span className="nav-count"><em>{(stats.categories[label] ?? 0).toLocaleString()}</em><i className={expandedCategory === label ? "expanded" : ""}><Icon name="chevron" size={11}/></i></span></button>{expandedCategory === label ? <div className="subcategory-list">{Object.entries(stats.subcategories[label] ?? {}).length ? Object.entries(stats.subcategories[label] ?? {}).map(([subcategory, count]) => <button key={subcategory} className={activeSubcategory === subcategory ? "active" : ""} onClick={() => setActiveSubcategory(activeSubcategory === subcategory ? null : subcategory)}><span>{ucsSubcategoryLabel(subcategory)}</span><em>{count.toLocaleString()}</em></button>) : <p>当前素材库暂无该类声音</p>}</div> : null}</div>)}
         </nav>
         <nav className="library-section">
           <label>本地素材库</label>
-          {stats.libraries.map((library) => <div className={`library-group ${draggingLibrary === library.path ? "is-dragging" : ""}`} key={library.path} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (draggingLibrary) void moveLibrary(draggingLibrary, library.path); setDraggingLibrary(null); }}><div className={`library-item ${activeLibrary === library.path && !activeFolder ? "active" : ""}`}><button className="library-order" draggable onDragStart={(event) => { event.stopPropagation(); setDraggingLibrary(library.path); event.dataTransfer.effectAllowed = "move"; }} onDragEnd={() => setDraggingLibrary(null)} title="拖动调整素材库顺序" aria-label={`调整 ${library.name} 的顺序`}><Icon name="drag" size={14}/></button><button className="library-name" aria-expanded={expandedLibrary === library.path} onClick={() => { const closing = expandedLibrary === library.path; setExpandedLibrary(closing ? null : library.path); setActiveLibrary(closing ? null : library.path); setActiveFolder(null); }} title={library.path}><i/><span><strong>{library.name}</strong><small>{library.soundCount.toLocaleString()} 个文件 · {libraryFolderCount(library)} 个子文件夹</small></span><b className={expandedLibrary === library.path ? "expanded" : ""}><Icon name="chevron" size={11}/></b></button><button className="mini-action" onClick={() => void rescan(library.path)} title="重新扫描"><Icon name="refresh" size={13}/></button><button className="mini-action danger" onClick={() => void removeLibraryFromIndex(library.path)} title="从索引移除"><Icon name="trash" size={13}/></button></div>{expandedLibrary === library.path ? <div className="library-children">{library.childFolders.length ? library.childFolders.map((folder) => <button key={folder.path} style={{ paddingLeft: `${7 + folder.depth * 14}px` }} className={activeFolder === folder.path ? "active" : ""} onClick={() => { setActiveLibrary(library.path); setActiveFolder(activeFolder === folder.path ? null : folder.path); }} title={folder.path}><span><Icon name="folder" size={12}/>{folder.name}</span><em>{folder.soundCount.toLocaleString()}</em></button>) : <p>母文件夹下没有可索引的子文件夹</p>}</div> : null}</div>)}
+          {stats.libraries.map((library, index) => <div className="library-group" key={library.path}>
+            <div className={`library-item ${activeLibrary === library.path && !activeFolder ? "active" : ""}`}>
+              <span className="library-order" aria-label={`调整 ${library.name} 的顺序`}>
+                <button disabled={index === 0} onClick={() => moveLibraryBy(library.path, -1)} title="上移素材库"><Icon name="up" size={12}/></button>
+                <button disabled={index === stats.libraries.length - 1} onClick={() => moveLibraryBy(library.path, 1)} title="下移素材库"><Icon name="down" size={12}/></button>
+              </span>
+              <button className="library-name" aria-expanded={expandedLibrary === library.path} onClick={() => { const closing = expandedLibrary === library.path; setExpandedLibrary(closing ? null : library.path); setActiveLibrary(closing ? null : library.path); setActiveFolder(null); }} title={library.path}><i/><span><strong>{library.name}</strong><small>{library.soundCount.toLocaleString()} 个文件 · {libraryFolderCount(library)} 个子文件夹</small></span><b className={expandedLibrary === library.path ? "expanded" : ""}><Icon name="chevron" size={11}/></b></button>
+              <button className="mini-action" onClick={() => void rescan(library.path)} title="重新扫描"><Icon name="refresh" size={13}/></button>
+              <button className="mini-action danger" onClick={() => void removeLibraryFromIndex(library.path)} title="从索引移除"><Icon name="trash" size={13}/></button>
+            </div>
+            {expandedLibrary === library.path ? <div className="library-children">{library.childFolders.length ? library.childFolders.map((folder) => <button key={folder.path} style={{ paddingLeft: `${7 + folder.depth * 14}px` }} className={activeFolder === folder.path ? "active" : ""} onClick={() => { setActiveLibrary(library.path); setActiveFolder(activeFolder === folder.path ? null : folder.path); }} title={folder.path}><span><Icon name="folder" size={12}/>{folder.name}</span><em>{folder.soundCount.toLocaleString()}</em></button>) : <p>母文件夹下没有可索引的子文件夹</p>}</div> : null}
+          </div>)}
           {!stats.libraries.length ? <p className="sidebar-empty">还没有添加任何素材库</p> : null}
         </nav>
       </aside>
@@ -605,11 +682,11 @@ export default function App() {
         {!desktop ? <div className="preview-notice"><Icon name="info" size={15}/><span>界面预览模式：桌面版会读取真实 SQLite 索引与本地波形。</span></div> : null}
         <div className="workspace-head"><div><span className="eyebrow">声景视图</span><strong>{activeTitle}</strong><span>{activeFolder ? activeFolder.split(/[\\/]/).pop() : activeLibrary ? stats.libraries.find((item) => item.path === activeLibrary)?.name : "全部素材库"}</span></div><p><strong>{sounds.length.toLocaleString()}</strong> 条结果{stats.total > 500 ? " · 显示前 500 条" : ""}</p></div>
         <div className="filter-strip"><span className="filter-label"><Icon name="spark" size={13}/>声音速查</span><div className="quick-filter-list">{quickFilters.map((term) => <button key={term} className={query === term ? "active" : ""} onClick={() => setQuery(query === term ? "" : term)}>{term}</button>)}</div><span className="key-hint"><kbd>W/S</kbd> 选择 <kbd>Space</kbd> 试听 <kbd>F</kbd> 收藏 <kbd>Z</kbd> 撤回</span></div>
-        <div className="table-head"><span>声音</span><span>智能分类</span><span>时长</span><span>规格</span><span>素材库</span><span/></div>
+        <div className="table-head"><span>声音</span><span>UCS 分类</span><span>时长</span><span>规格</span><span>素材库</span><span/></div>
         <div className={`sound-list ${loading ? "loading" : ""}`}>
-          {sounds.map((sound, index) => <article key={sound.path} draggable={desktop} onDragStart={(event) => { event.preventDefault(); void beginExternalDrag(sound); }} title="拖到桌面、Finder 或其他软件即可复制音频" data-sound-index={index} className={`${selected?.path === sound.path ? "selected" : ""} ${sound.favorite ? "is-favorite" : ""} ${playing && selected?.path === sound.path ? "is-playing" : ""}`} onClick={() => selectSound(sound)} onDoubleClick={() => void togglePlay(sound)}>
+          {sounds.map((sound, index) => <article key={sound.path} draggable={desktop} onDragStart={(event) => { event.preventDefault(); void beginExternalDrag(sound); }} onContextMenu={(event) => { event.preventDefault(); selectSound(sound); setSoundMenu({ sound, x: Math.min(event.clientX, window.innerWidth - 220), y: Math.min(event.clientY, window.innerHeight - 210) }); }} title="拖到桌面、Finder 或其他软件即可复制音频；右键打开操作菜单" data-sound-index={index} className={`${selected?.path === sound.path ? "selected" : ""} ${sound.favorite ? "is-favorite" : ""} ${playing && selected?.path === sound.path ? "is-playing" : ""}`} onClick={() => selectSound(sound)} onDoubleClick={() => void togglePlay(sound)}>
             <div className="sound-name"><button className={sound.favorite ? "favorite active" : "favorite"} onClick={(event) => { event.stopPropagation(); void toggleFavorite(sound); }} aria-label="收藏"><Icon name="heart" size={14}/></button><span><strong>{soundTitle(sound)}</strong>{sound.displayName ? <small className="original-name">原名 · {sound.name}</small> : <small title={sound.path}>{sound.path}</small>}</span>{sound.displayName ? <b className="translated-badge">中</b> : null}</div>
-            <div className="category-cell"><strong>{sound.category}</strong><small>{sound.subcategory}</small></div>
+            <div className="category-cell"><strong>{sound.category}</strong><small>{ucsSubcategoryLabel(sound.subcategory)}</small></div>
             <span className="mono">{formatTime(sound.duration)}</span>
             <div className="spec-cell"><strong>{sound.sampleRate ? `${sound.sampleRate / 1000} kHz` : "—"}{sound.bitDepth ? ` · ${sound.bitDepth} bit` : ""}</strong><small>{sound.extension.replace(".", "").toUpperCase()} · {channelName(sound.channels)}</small></div>
             <span className="library-cell">{sound.libraryName}</span>
@@ -625,8 +702,9 @@ export default function App() {
         {selected ? <>
           <div className="file-card"><strong>{soundTitle(selected)}</strong>{selected.displayName ? <small>原始文件名 · {selected.name}</small> : <small>{selected.libraryName}</small>}</div>
           <section className="name-lab"><div className="section-title"><span><Icon name="spark" size={13}/>中文显示名</span><em>仅本地索引</em></div><p>只翻译“{selected.name}”；真实路径与硬盘文件名始终不变。</p><label><input value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} placeholder="生成或输入中文显示名"/><button onClick={() => void saveNameDraft()} aria-label="保存显示名"><Icon name="edit" size={14}/></button></label><div className="name-actions"><button className="translate-button" disabled={translating} onClick={() => void translateSelected()}><Icon name="spark" size={14}/>{translating ? "生成中…" : "专业释义"}</button><button disabled={!selected.canUndoName} onClick={() => void undoName()}><Icon name="undo" size={14}/>撤回</button><button disabled={!selected.displayName} onClick={() => void restoreOriginalName()}>原名</button></div></section>
-          <div className="classification"><label>智能分类</label><strong>{selected.category}</strong><span>{selected.subcategory}</span><p>由文件名与目录语义匹配，仅改变虚拟视图。</p></div>
-          <dl><div><dt>时长</dt><dd className="mono">{formatTime(selected.duration)}</dd></div><div><dt>采样率</dt><dd>{selected.sampleRate ? `${selected.sampleRate / 1000} kHz` : "未读取"}</dd></div><div><dt>位深 / 声道</dt><dd>{selected.bitDepth ? `${selected.bitDepth} bit · ` : ""}{channelName(selected.channels)}</dd></div><div><dt>格式 / 大小</dt><dd>{selectedFormat} · {formatBytes(selected.fileSize)}</dd></div><div><dt>试听次数</dt><dd>{selected.playCount.toLocaleString()}</dd></div></dl>
+          <div className="classification"><label>UCS v8.2.1 分类</label><strong>{selected.category}</strong><span>{ucsSubcategoryLabel(selected.subcategory)}</span>{ucsCatId(selected.subcategory) ? <em>{ucsCatId(selected.subcategory)}</em> : null}<p>按 Universal Category System 语义匹配，仅改变声屿虚拟视图。</p></div>
+          <section className="format-profile"><label>音频格式</label><ChannelBadge channels={selected.channels} prominent/><p><strong>{selectedFormat}</strong><span>{selected.sampleRate ? `${selected.sampleRate / 1000} kHz` : "采样率未读取"}{selected.bitDepth ? ` · ${selected.bitDepth} bit` : ""}</span></p></section>
+          <dl><div><dt>时长</dt><dd className="mono">{formatTime(selected.duration)}</dd></div><div><dt>采样率</dt><dd>{selected.sampleRate ? `${selected.sampleRate / 1000} kHz` : "未读取"}</dd></div><div><dt>格式 / 大小</dt><dd>{selectedFormat} · {formatBytes(selected.fileSize)}</dd></div><div><dt>试听次数</dt><dd>{selected.playCount.toLocaleString()}</dd></div></dl>
           {selected.tags.length ? <section className="tag-section"><label>语义标签</label><div>{selected.tags.map((tag) => <button key={tag} onClick={() => setQuery(tag)}>{tag}</button>)}</div></section> : null}
           <section className="path-section"><label>真实路径</label><p title={selected.path}>{selected.path}</p></section>
           <div className="inspector-actions"><button className="primary" onClick={() => void locate(selected)}><Icon name="locate" size={16}/>定位原文件</button><button onClick={findSimilar}><Icon name="similar" size={15}/>找相似</button><button className={selected.favorite ? "active" : ""} onClick={() => void toggleFavorite(selected)}><Icon name="heart" size={16}/>{selected.favorite ? "已收藏" : "收藏"}</button></div>
@@ -634,13 +712,20 @@ export default function App() {
       </aside>
 
       <section className="player">
-        <div className="now-playing"><button className={selected?.favorite ? "favorite active" : "favorite"} onClick={() => selected && void toggleFavorite(selected)}><Icon name="heart" size={16}/></button><span><small>正在试听</small><strong>{soundTitle(selected)}</strong><em>{selected ? `${selected.category} · ${selectedFormat}` : "添加素材库后开始试听"}</em></span></div>
+        <div className="now-playing"><button className={selected?.favorite ? "favorite active" : "favorite"} onClick={() => selected && void toggleFavorite(selected)}><Icon name="heart" size={16}/></button><span><small>正在试听</small><strong>{soundTitle(selected)}</strong>{selected ? <ChannelBadge channels={selected.channels}/> : <em>添加素材库后开始试听</em>}</span></div>
         <button className="play-button" disabled={!selected} onClick={() => void togglePlay()} aria-label={playing ? "暂停" : "播放"}><Icon name={playing ? "pause" : "play"} size={22}/></button>
         <div className="waveform-wrap"><div className="waveform-stage"><Waveform ref={playerWaveformRef} peaks={waveform} progress={0} loading={waveformLoading} disabled={!selected} onSeek={seek}/></div><div><span ref={playerElapsedRef} className="mono">{formatTime(0)}</span><span className="mono">{formatTime(selected?.duration)}</span></div></div>
-        <div className="transport-tools"><button className={autoAdvance ? "active" : ""} onClick={() => { setAutoAdvance((value) => !value); setLoopPlayback(false); }} title="播放结束后自动试听下一条"><Icon name="next" size={15}/>连播</button><button className={loopPlayback ? "active" : ""} onClick={() => { setLoopPlayback((value) => !value); setAutoAdvance(false); }} title="循环当前声音"><Icon name="loop" size={14}/>循环</button><button className={pitchSemitones ? "active pitch-button" : "pitch-button"} onClick={cyclePitch} title="切换原速、降六半音、升六半音">音高 {pitchSemitones === 0 ? "原速" : `${pitchSemitones > 0 ? "+" : ""}${pitchSemitones}`}</button><button onClick={() => void exportSelected()} title="导出所选原始音频副本（Cmd/Ctrl + E）">导出 ⌘E</button><kbd>SPACE</kbd><div className="volume"><Icon name="volume" size={17}/><input aria-label="音量" type="range" min="0" max="1" step="0.01" value={volume} onChange={(event) => setVolume(Number(event.target.value))}/></div></div>
+        <div className="transport-tools"><button className={autoAdvance ? "active" : ""} onClick={() => { setAutoAdvance((value) => !value); setLoopPlayback(false); }} title="播放结束后自动试听下一条"><Icon name="next" size={15}/>连播</button><button className={loopPlayback ? "active" : ""} onClick={() => { setLoopPlayback((value) => !value); setAutoAdvance(false); }} title="循环当前声音"><Icon name="loop" size={14}/>循环</button><div className="volume"><Icon name="volume" size={17}/><input aria-label="音量" type="range" min="0" max="1" step="0.01" value={volume} onChange={(event) => setVolume(Number(event.target.value))}/></div></div>
       </section>
 
       {soundLabOpen && selected ? <SoundLab sound={selected} onClose={() => setSoundLabOpen(false)} onNotice={showToast}/> : null}
+      {soundMenu ? <div className="sound-context-menu" role="menu" style={{ left: soundMenu.x, top: soundMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
+        <header><strong>{soundTitle(soundMenu.sound)}</strong><small>{channelName(soundMenu.sound.channels)} · {soundMenu.sound.extension.replace(".", "").toUpperCase()}</small></header>
+        <button role="menuitem" onClick={() => { void copySelected(soundMenu.sound); setSoundMenu(null); }}><Icon name="copy" size={15}/><span>复制音频文件</span><kbd>⌘C</kbd></button>
+        <button role="menuitem" onClick={() => openSoundLab(soundMenu.sound)}><Icon name="lab" size={15}/><span>在声音实验室编辑</span></button>
+        <button role="menuitem" onClick={() => { void locate(soundMenu.sound); setSoundMenu(null); }}><Icon name="locate" size={15}/><span>定位原文件</span></button>
+        <button role="menuitem" onClick={() => { void toggleFavorite(soundMenu.sound); setSoundMenu(null); }}><Icon name="heart" size={15}/><span>{soundMenu.sound.favorite ? "取消收藏" : "加入收藏"}</span></button>
+      </div> : null}
       {scanning ? <div className="scan-overlay"><div className="scan-dialog"><div className="spinner"/><strong>正在建立本地智能索引</strong><p>{scanning.currentFile || "分析文件名与音频规格…"}</p><div className="scan-progress"><span style={{ width: scanning.discovered ? `${Math.min(100, scanning.processed / scanning.discovered * 100)}%` : "12%" }}/></div><small>已处理 {scanning.processed.toLocaleString()} / {scanning.discovered.toLocaleString()} · 音频不会上传</small></div></div> : null}
       {toast ? <div className="toast"><i>✓</i>{toast}</div> : null}
     </main>

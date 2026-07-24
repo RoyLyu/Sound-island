@@ -3,6 +3,7 @@ mod db;
 mod file_ops;
 mod sound_lab;
 mod translation;
+mod ucs_catalog;
 mod waveform;
 
 use db::{AppState, LibraryStats, ScanSummary, SearchRequest, SoundNameUpdate, SoundRow};
@@ -169,6 +170,16 @@ async fn reveal_in_file_manager(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn copy_sound_to_clipboard(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        file_ops::copy_sound_to_clipboard(std::path::Path::new(&path))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn export_sound_lab_audio(
     input_path: String,
     output_path: String,
@@ -216,6 +227,7 @@ pub fn run() {
             remove_library,
             reorder_libraries,
             reveal_in_file_manager,
+            copy_sound_to_clipboard,
             export_sound_lab_audio
         ])
         .run(tauri::generate_context!())

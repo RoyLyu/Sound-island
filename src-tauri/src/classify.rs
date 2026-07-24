@@ -1,5 +1,10 @@
+use crate::ucs_catalog::{UcsTerm, UCS_RULES, UCS_TERMS};
 use serde::Serialize;
-use std::path::Path;
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::OnceLock,
+};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -9,386 +14,203 @@ pub struct Classification {
     pub tags: Vec<String>,
 }
 
-struct Rule {
-    category: &'static str,
-    subcategory: &'static str,
-    terms: &'static [&'static str],
+type TermIndex = HashMap<&'static str, Vec<(usize, u16)>>;
+pub const CLASSIFIER_VERSION: &str = "ucs-8.2.1-r2";
+
+fn term_index() -> &'static TermIndex {
+    static INDEX: OnceLock<TermIndex> = OnceLock::new();
+    INDEX.get_or_init(|| {
+        let mut index = HashMap::<&'static str, Vec<(usize, u16)>>::new();
+        for UcsTerm { term, rule, weight } in UCS_TERMS {
+            index.entry(term).or_default().push((*rule, *weight));
+        }
+        index
+    })
 }
 
-const RULES: &[Rule] = &[
-    Rule {
-        category: "设计音 Design",
-        subcategory: "转场 / Whoosh",
-        terms: &["whoosh", "woosh", "swoosh", "transition", "转场", "呼啸"],
-    },
-    Rule {
-        category: "设计音 Design",
-        subcategory: "上升 / Riser",
-        terms: &["riser", "rise", "uplifter", "build up", "上升", "渐强"],
-    },
-    Rule {
-        category: "设计音 Design",
-        subcategory: "低频 / Braam",
-        terms: &["braam", "boom", "sub drop", "downer", "低频", "重音"],
-    },
-    Rule {
-        category: "设计音 Design",
-        subcategory: "氛围设计 / Drone",
-        terms: &[
-            "drone",
-            "tonal",
-            "designed",
-            "cinematic",
-            "trailer",
-            "sound design",
-            "设计音",
-        ],
-    },
-    Rule {
-        category: "武器 Weapons",
-        subcategory: "枪械 / Guns",
-        terms: &[
-            "gun", "gunshot", "shot", "rifle", "pistol", "revolver", "firearm", "枪", "步枪",
-            "手枪", "开火",
-        ],
-    },
-    Rule {
-        category: "武器 Weapons",
-        subcategory: "刀剑 / Blades",
-        terms: &[
-            "sword", "knife", "blade", "saber", "katana", "dagger", "刀", "剑", "拔刀",
-        ],
-    },
-    Rule {
-        category: "武器 Weapons",
-        subcategory: "弹药 / Ammunition",
-        terms: &[
-            "bullet", "shell", "ammo", "reload", "magazine", "子弹", "弹壳", "换弹",
-        ],
-    },
-    Rule {
-        category: "交通 Vehicles",
-        subcategory: "汽车 / Cars",
-        terms: &[
-            "car", "auto", "vehicle", "sedan", "suv", "truck", "bus", "汽车", "轿车", "卡车",
-            "巴士",
-        ],
-    },
-    Rule {
-        category: "交通 Vehicles",
-        subcategory: "发动机 / Engines",
-        terms: &[
-            "engine",
-            "motor",
-            "ignition",
-            "rev",
-            "idle",
-            "发动机",
-            "引擎",
-            "点火",
-        ],
-    },
-    Rule {
-        category: "交通 Vehicles",
-        subcategory: "航空 / Aircraft",
-        terms: &[
-            "airplane",
-            "aircraft",
-            "jet",
-            "helicopter",
-            "plane",
-            "飞机",
-            "直升机",
-            "喷气",
-        ],
-    },
-    Rule {
-        category: "交通 Vehicles",
-        subcategory: "轨道交通 / Rail",
-        terms: &[
-            "train", "rail", "subway", "metro", "tram", "火车", "地铁", "电车",
-        ],
-    },
-    Rule {
-        category: "交通 Vehicles",
-        subcategory: "船舶 / Watercraft",
-        terms: &[
-            "boat",
-            "ship",
-            "watercraft",
-            "submarine",
-            "船",
-            "轮船",
-            "潜艇",
-        ],
-    },
-    Rule {
-        category: "生物 Creature",
-        subcategory: "怪兽 / Monsters",
-        terms: &[
-            "creature", "monster", "growl", "roar", "beast", "demon", "怪兽", "怪物", "低吼",
-            "咆哮",
-        ],
-    },
-    Rule {
-        category: "生物 Creature",
-        subcategory: "动物 / Animals",
-        terms: &[
-            "animal", "dog", "cat", "horse", "cow", "pig", "犬", "狗", "猫", "马", "动物",
-        ],
-    },
-    Rule {
-        category: "生物 Creature",
-        subcategory: "鸟类 / Birds",
-        terms: &["bird", "crow", "raven", "eagle", "owl", "鸟", "乌鸦", "鹰"],
-    },
-    Rule {
-        category: "生物 Creature",
-        subcategory: "昆虫 / Insects",
-        terms: &[
-            "insect", "bee", "fly", "mosquito", "cricket", "虫", "蜜蜂", "蚊",
-        ],
-    },
-    Rule {
-        category: "界面 UI",
-        subcategory: "点击 / Clicks",
-        terms: &[
-            "ui",
-            "interface",
-            "button",
-            "click",
-            "select",
-            "toggle",
-            "界面",
-            "按钮",
-            "点击",
-        ],
-    },
-    Rule {
-        category: "界面 UI",
-        subcategory: "通知 / Notifications",
-        terms: &[
-            "notification",
-            "alert",
-            "message",
-            "success",
-            "error",
-            "通知",
-            "提示",
-            "警告",
-        ],
-    },
-    Rule {
-        category: "界面 UI",
-        subcategory: "电子提示 / Beeps",
-        terms: &[
-            "beep", "bleep", "digital", "computer", "scanner", "电子", "滴声", "蜂鸣",
-        ],
-    },
-    Rule {
-        category: "拟音 Foley",
-        subcategory: "脚步 / Footsteps",
-        terms: &[
-            "footstep",
-            "footsteps",
-            "steps",
-            "walk",
-            "walking",
-            "run",
-            "boots",
-            "shoe",
-            "脚步",
-            "走路",
-            "跑步",
-            "鞋",
-        ],
-    },
-    Rule {
-        category: "拟音 Foley",
-        subcategory: "衣物 / Cloth",
-        terms: &[
-            "cloth", "clothes", "fabric", "movement", "rustle", "衣物", "布料", "摩擦",
-        ],
-    },
-    Rule {
-        category: "拟音 Foley",
-        subcategory: "身体 / Body",
-        terms: &[
-            "body", "hand", "grab", "skin", "breath", "kiss", "身体", "手", "抓", "呼吸",
-        ],
-    },
-    Rule {
-        category: "拟音 Foley",
-        subcategory: "道具 / Props",
-        terms: &[
-            "foley", "prop", "keys", "bag", "paper", "book", "cup", "拟音", "道具", "钥匙", "纸",
-            "书",
-        ],
-    },
-    Rule {
-        category: "硬音效 Hard FX",
-        subcategory: "撞击 / Impacts",
-        terms: &[
-            "impact", "hit", "slam", "crash", "thud", "punch", "撞击", "击打", "重击", "碰撞",
-        ],
-    },
-    Rule {
-        category: "硬音效 Hard FX",
-        subcategory: "爆炸 / Explosions",
-        terms: &[
-            "explosion",
-            "explode",
-            "blast",
-            "detonation",
-            "爆炸",
-            "爆破",
-        ],
-    },
-    Rule {
-        category: "硬音效 Hard FX",
-        subcategory: "破碎 / Breaks",
-        terms: &[
-            "break", "debris", "shatter", "glass", "碎裂", "破碎", "玻璃",
-        ],
-    },
-    Rule {
-        category: "硬音效 Hard FX",
-        subcategory: "门窗 / Doors",
-        terms: &[
-            "door", "window", "gate", "latch", "hinge", "门", "窗", "门锁",
-        ],
-    },
-    Rule {
-        category: "硬音效 Hard FX",
-        subcategory: "材质 / Materials",
-        terms: &[
-            "metal", "wood", "plastic", "stone", "concrete", "金属", "木头", "塑料", "石头",
-        ],
-    },
-    Rule {
-        category: "环境 Ambience",
-        subcategory: "室内底噪 / Room Tone",
-        terms: &[
-            "room tone",
-            "roomtone",
-            "interior",
-            "indoor",
-            "quiet room",
-            "室内",
-            "房间底噪",
-            "空房",
-        ],
-    },
-    Rule {
-        category: "环境 Ambience",
-        subcategory: "天气 / Weather",
-        terms: &[
-            "rain", "storm", "thunder", "wind", "snow", "weather", "雨", "暴雨", "雷", "风", "雪",
-        ],
-    },
-    Rule {
-        category: "环境 Ambience",
-        subcategory: "城市 / Urban",
-        terms: &[
-            "city", "urban", "street", "traffic", "crowd", "market", "城市", "街道", "车流",
-            "人群", "市场",
-        ],
-    },
-    Rule {
-        category: "环境 Ambience",
-        subcategory: "自然 / Nature",
-        terms: &[
-            "forest", "nature", "river", "ocean", "sea", "mountain", "jungle", "森林", "自然",
-            "河流", "海", "山",
-        ],
-    },
-    Rule {
-        category: "环境 Ambience",
-        subcategory: "环境 / General",
-        terms: &[
-            "ambience",
-            "ambiance",
-            "ambient",
-            "atmosphere",
-            "background",
-            "环境",
-            "氛围",
-            "背景",
-        ],
-    },
-];
+fn normalize(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut previous_space = true;
+    for character in value.chars().flat_map(char::to_lowercase) {
+        if character.is_alphanumeric() || ('\u{3400}'..='\u{9fff}').contains(&character) {
+            output.push(character);
+            previous_space = false;
+        } else if !previous_space {
+            output.push(' ');
+            previous_space = true;
+        }
+    }
+    output.trim().to_string()
+}
 
-fn filename_tags(path: &Path) -> Vec<String> {
+fn contains_cjk(value: &str) -> bool {
+    value
+        .chars()
+        .any(|character| ('\u{3400}'..='\u{9fff}').contains(&character))
+}
+
+fn search_keys(value: &str) -> HashSet<String> {
+    let normalized = normalize(value);
+    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
+    let mut keys = HashSet::new();
+    if !normalized.is_empty() {
+        keys.insert(normalized.clone());
+    }
+    for start in 0..tokens.len() {
+        for length in 1..=4.min(tokens.len() - start) {
+            keys.insert(tokens[start..start + length].join(" "));
+        }
+        let token = tokens[start];
+        if token.len() > 4 && token.ends_with('s') {
+            keys.insert(token[..token.len() - 1].to_string());
+        } else if token.len() > 3
+            && token
+                .chars()
+                .all(|character| character.is_ascii_alphabetic())
+        {
+            keys.insert(format!("{token}s"));
+        }
+        if contains_cjk(token) {
+            let characters = token.chars().collect::<Vec<_>>();
+            for offset in 0..characters.len() {
+                for length in 1..=8.min(characters.len() - offset) {
+                    keys.insert(characters[offset..offset + length].iter().collect());
+                }
+            }
+        }
+    }
+    keys
+}
+
+fn score(
+    value: &str,
+    multiplier: u32,
+    rule_scores: &mut [u32],
+    category_scores: &mut HashMap<&'static str, u32>,
+) {
+    let index = term_index();
+    for key in search_keys(value) {
+        if let Some(matches) = index.get(key.as_str()) {
+            let mut category_weights = HashMap::<&'static str, u16>::new();
+            let max_weight = matches
+                .iter()
+                .map(|(_, weight)| *weight)
+                .max()
+                .unwrap_or_default();
+            let strongest = matches
+                .iter()
+                .filter(|(_, weight)| *weight == max_weight)
+                .collect::<Vec<_>>();
+
+            for (rule, weight) in matches {
+                let category_code = UCS_RULES[*rule].category_code;
+                category_weights
+                    .entry(category_code)
+                    .and_modify(|current| *current = (*current).max(*weight))
+                    .or_insert(*weight);
+            }
+            for (category_code, weight) in category_weights {
+                *category_scores.entry(category_code).or_default() +=
+                    u32::from(weight) * multiplier;
+            }
+
+            if strongest.len() == 1 {
+                let (rule, weight) = strongest[0];
+                rule_scores[*rule] += u32::from(*weight) * multiplier;
+            }
+        }
+    }
+}
+
+fn unique_best<'a, I>(values: I) -> Option<(&'a str, u32)>
+where
+    I: Iterator<Item = (&'a str, u32)>,
+{
+    let mut ordered = values.collect::<Vec<_>>();
+    ordered.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
+    let best = ordered.first().copied()?;
+    if ordered.get(1).is_some_and(|second| second.1 == best.1) {
+        None
+    } else {
+        Some(best)
+    }
+}
+
+fn tags(path: &Path) -> Vec<String> {
     let stem = path
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or_default();
-    let mut tags = Vec::new();
-    for token in stem.split(|character: char| !character.is_alphanumeric()) {
-        let normalized = token.trim().to_lowercase();
-        if normalized.chars().count() >= 2 && !tags.contains(&normalized) {
-            tags.push(normalized);
-        }
-        if tags.len() == 10 {
-            break;
-        }
-    }
-    tags
+    normalize(stem)
+        .split_whitespace()
+        .filter(|token| token.chars().count() > 1)
+        .take(12)
+        .map(str::to_string)
+        .collect()
 }
 
 pub fn classify(path: &Path) -> Classification {
-    let raw = path.to_string_lossy().to_lowercase();
-    let normalized: String = raw
-        .chars()
-        .map(|character| {
-            if character.is_alphanumeric() {
-                character
-            } else {
-                ' '
-            }
-        })
-        .collect();
-    let padded = format!(
-        " {} ",
-        normalized.split_whitespace().collect::<Vec<_>>().join(" ")
+    let mut rule_scores = vec![0_u32; UCS_RULES.len()];
+    let mut category_scores = HashMap::<&'static str, u32>::new();
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    score(stem, 3, &mut rule_scores, &mut category_scores);
+    score(
+        &path.to_string_lossy(),
+        1,
+        &mut rule_scores,
+        &mut category_scores,
     );
-    let mut best: Option<(&Rule, usize)> = None;
 
-    for rule in RULES {
-        let score = rule
-            .terms
-            .iter()
-            .filter(|term| {
-                if term.is_ascii() {
-                    padded.contains(&format!(" {} ", term))
-                } else {
-                    raw.contains(**term)
-                }
-            })
-            .count();
-        if score > 0
-            && best
-                .as_ref()
-                .map(|(_, current)| score > *current)
-                .unwrap_or(true)
-        {
-            best = Some((rule, score));
-        }
-    }
+    let best_category = unique_best(category_scores.into_iter())
+        .filter(|(_, score)| *score >= 4)
+        .map(|(category, _)| category);
+    let mut rule_candidates = rule_scores
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            best_category.is_some_and(|category| UCS_RULES[*index].category_code == category)
+        })
+        .map(|(index, score)| (index, *score))
+        .collect::<Vec<_>>();
+    rule_candidates.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
+    let best_rule = rule_candidates
+        .first()
+        .filter(|(_, score)| *score >= 4)
+        .filter(|(_, score)| {
+            rule_candidates
+                .get(1)
+                .map_or(true, |(_, second_score)| second_score != score)
+        })
+        .map(|(index, _)| &UCS_RULES[*index]);
 
-    let tags = filename_tags(path);
-    if let Some((rule, _)) = best {
-        Classification {
-            category: rule.category.into(),
-            subcategory: rule.subcategory.into(),
-            tags,
+    match (best_category, best_rule) {
+        (Some(_), Some(rule)) => Classification {
+            category: format!("{} / {}", rule.category_zh, rule.category_code),
+            subcategory: format!(
+                "{} / {} · {}",
+                rule.subcategory_zh, rule.subcategory_code, rule.cat_id
+            ),
+            tags: tags(path),
+        },
+        (Some(category_code), None) => {
+            let category = UCS_RULES
+                .iter()
+                .find(|rule| rule.category_code == category_code)
+                .expect("category score must come from an existing UCS rule");
+            Classification {
+                category: format!("{} / {}", category.category_zh, category.category_code),
+                subcategory: "未细分 / UNSPECIFIED".into(),
+                tags: tags(path),
+            }
         }
-    } else {
-        Classification {
-            category: "未分类".into(),
-            subcategory: "待整理".into(),
-            tags,
-        }
+        (None, _) => Classification {
+            category: "待归类 / UNCATEGORIZED".into(),
+            subcategory: "未匹配 / MISC".into(),
+            tags: tags(path),
+        },
     }
 }
 
@@ -397,31 +219,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classifies_bilingual_common_names() {
-        assert_eq!(
-            classify(Path::new("Library/AMB_Rain_Heavy_01.wav")).category,
-            "环境 Ambience"
-        );
-        assert_eq!(
-            classify(Path::new("拟音/Leather_Boots_Footsteps.aif")).subcategory,
-            "脚步 / Footsteps"
-        );
-        assert_eq!(
-            classify(Path::new("Creature_Monster_Growl_03.wav")).category,
-            "生物 Creature"
-        );
-        assert_eq!(
-            classify(Path::new("UI_Notification_Success.wav")).category,
-            "界面 UI"
-        );
-        assert_eq!(
-            classify(Path::new("车辆/Car Engine Idle.wav")).category,
-            "交通 Vehicles"
-        );
+    fn uses_official_ucs_labels_for_common_sound_names() {
+        let footsteps = classify(Path::new("Foley/Leather_Boots_Footsteps.aif"));
+        assert_eq!(footsteps.category, "脚步 / FOOTSTEPS");
+
+        let jet = classify(Path::new("008 Jet Takes Off.wav"));
+        assert_eq!(jet.category, "航空器 / AIRCRAFT");
+        assert!(jet.subcategory.contains("AEROJet"));
+
+        let door = classify(Path::new("Metal Door Slam.wav"));
+        assert_eq!(door.category, "门 / DOORS");
     }
 
     #[test]
-    fn leaves_unknown_files_uncategorized() {
-        assert_eq!(classify(Path::new("ZXCV_000192.wav")).category, "未分类");
+    fn does_not_invent_a_child_category_from_shared_parent_terms() {
+        let ambience = classify(Path::new("what if_环境声/ZOOM0184_LR.WAV"));
+        assert_eq!(ambience.category, "环境 / AMBIENCE");
+        assert_eq!(ambience.subcategory, "未细分 / UNSPECIFIED");
+    }
+
+    #[test]
+    fn keeps_unmatched_files_in_an_explicit_bucket() {
+        assert_eq!(
+            classify(Path::new("000000.xyz")).category,
+            "待归类 / UNCATEGORIZED"
+        );
     }
 }

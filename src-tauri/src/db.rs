@@ -1,4 +1,4 @@
-use crate::classify::classify;
+use crate::classify::{classify, CLASSIFIER_VERSION};
 use anyhow::{Context, Result};
 use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
@@ -130,7 +130,7 @@ pub fn init_db(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).context("create application data directory")?;
     }
-    let connection = Connection::open(path).context("open SQLite index")?;
+    let mut connection = Connection::open(path).context("open SQLite index")?;
     connection.execute_batch(
         r#"
         PRAGMA journal_mode = WAL;
@@ -142,6 +142,11 @@ pub fn init_db(path: &Path) -> Result<()> {
           name TEXT NOT NULL,
           added_at INTEGER NOT NULL,
           sort_order INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS app_metadata (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS sounds (
@@ -198,6 +203,48 @@ pub fn init_db(path: &Path) -> Result<()> {
     ensure_sound_column(&connection, "play_count", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_library_column(&connection, "sort_order", "INTEGER NOT NULL DEFAULT 0")?;
     connection.execute("DELETE FROM sounds WHERE name LIKE '._%'", [])?;
+    migrate_classifications(&mut connection)?;
+    Ok(())
+}
+
+fn migrate_classifications(connection: &mut Connection) -> Result<()> {
+    let current = connection
+        .query_row(
+            "SELECT value FROM app_metadata WHERE key='classifier_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if current.as_deref() == Some(CLASSIFIER_VERSION) {
+        return Ok(());
+    }
+
+    let paths = {
+        let mut statement = connection.prepare("SELECT path FROM sounds")?;
+        let paths = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        paths
+    };
+    let transaction = connection.transaction()?;
+    for path in paths {
+        let classification = classify(Path::new(&path));
+        let tags = serde_json::to_string(&classification.tags)?;
+        transaction.execute(
+            "UPDATE sounds SET category=?2, subcategory=?3, tags=?4 WHERE path=?1",
+            params![
+                path,
+                classification.category,
+                classification.subcategory,
+                tags
+            ],
+        )?;
+    }
+    transaction.execute(
+        "INSERT INTO app_metadata(key,value) VALUES('classifier_version',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![CLASSIFIER_VERSION],
+    )?;
+    transaction.commit()?;
     Ok(())
 }
 
