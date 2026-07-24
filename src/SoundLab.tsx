@@ -71,6 +71,26 @@ const presets: Array<{ name: string; description: string; settings: SoundLabSett
     description: "短延迟与颗粒化饱和",
     settings: { ...spatialDefaults, stereoWidth: 1.38, preset: "malfunction", lowGainDb: 3, midGainDb: 5, highGainDb: 6, reverbMix: 0.12, delayMix: 0.38, delayMs: 74, delayFeedback: 0.58, distortion: 0.48, outputGainDb: -4 },
   },
+  {
+    name: "对白聚焦",
+    description: "削减浑浊，强化语音清晰度",
+    settings: { ...spatialDefaults, stereoWidth: 0.88, preset: "dialog-focus", lowGainDb: -4, midGainDb: 6, highGainDb: 3.5, reverbMix: 0.02, delayMix: 0, delayMs: 90, delayFeedback: 0, distortion: 0.05, outputGainDb: -1.5 },
+  },
+  {
+    name: "超重低频",
+    description: "明显加重冲击、引擎与大型物体",
+    settings: { ...spatialDefaults, stereoWidth: 1.18, preset: "heavy-low", lowGainDb: 11, midGainDb: -3.5, highGainDb: -2, reverbMix: 0.08, delayMix: 0.03, delayMs: 78, delayFeedback: 0.12, distortion: 0.24, outputGainDb: -4.5 },
+  },
+  {
+    name: "梦境扩散",
+    description: "宽阔柔亮的空间与延迟尾音",
+    settings: { ...spatialDefaults, stereoWidth: 1.68, spacePreset: "valley", preset: "dream-spread", lowGainDb: -1, midGainDb: -2.5, highGainDb: 5, reverbMix: 0.58, delayMix: 0.24, delayMs: 310, delayFeedback: 0.42, distortion: 0.02, outputGainDb: -3 },
+  },
+  {
+    name: "紧张脉冲",
+    description: "短促重复与饱和，适合悬疑节奏",
+    settings: { ...spatialDefaults, stereoWidth: 1.42, preset: "tension-pulse", lowGainDb: 4, midGainDb: 2.5, highGainDb: 3, reverbMix: 0.14, delayMix: 0.46, delayMs: 118, delayFeedback: 0.62, distortion: 0.2, outputGainDb: -4 },
+  },
 ];
 
 const workspaceCards: Array<{ id: Exclude<Workspace, "tone">; name: string; description: string }> = [
@@ -282,7 +302,7 @@ function Slider({ label, value, min, max, step, suffix, onChange }: { label: str
   return <label className="lab-slider"><span><b>{label}</b><em>{value > 0 && min < 0 ? "+" : ""}{value}{suffix}</em></span><input type="range" min={min} max={max} step={step} value={value} onChange={(event) => onChange(Number(event.target.value))}/></label>;
 }
 
-function extractWaveformPeaks(buffer: AudioBuffer, count = 180) {
+function extractWaveformPeaks(buffer: AudioBuffer, count = 420) {
   const peaks = new Array<number>(count).fill(0);
   const bucketSize = Math.max(1, buffer.length / count);
   for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
@@ -290,7 +310,7 @@ function extractWaveformPeaks(buffer: AudioBuffer, count = 180) {
     for (let bucket = 0; bucket < count; bucket += 1) {
       const start = Math.floor(bucket * bucketSize);
       const end = Math.min(data.length, Math.floor((bucket + 1) * bucketSize));
-      const step = Math.max(1, Math.floor((end - start) / 64));
+      const step = Math.max(1, Math.floor((end - start) / 128));
       let peak = peaks[bucket];
       for (let index = start; index < end; index += step) peak = Math.max(peak, Math.abs(data[index]));
       peaks[bucket] = peak;

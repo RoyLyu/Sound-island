@@ -32,6 +32,53 @@ pub fn copy_sound(input_path: &Path, output_path: &Path) -> Result<FileExport> {
     })
 }
 
+#[cfg(target_os = "macos")]
+pub fn copy_sound_to_clipboard(path: &Path) -> Result<()> {
+    let source = path.canonicalize().context("音频文件不存在")?;
+    if !source.is_file() {
+        anyhow::bail!("所选路径不是文件");
+    }
+    let script = r#"on run argv
+set the clipboard to (POSIX file (item 1 of argv))
+end run"#;
+    let status = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .arg(source.as_os_str())
+        .status()
+        .context("无法调用 macOS 剪贴板")?;
+    if !status.success() {
+        anyhow::bail!("复制音频到剪贴板失败");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub fn copy_sound_to_clipboard(path: &Path) -> Result<()> {
+    let source = path.canonicalize().context("音频文件不存在")?;
+    if !source.is_file() {
+        anyhow::bail!("所选路径不是文件");
+    }
+    let status = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "Set-Clipboard -LiteralPath $args[0]",
+        ])
+        .arg(source.as_os_str())
+        .status()
+        .context("无法调用 Windows 剪贴板")?;
+    if !status.success() {
+        anyhow::bail!("复制音频到剪贴板失败");
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn copy_sound_to_clipboard(_path: &Path) -> Result<()> {
+    anyhow::bail!("当前系统暂不支持把文件对象写入剪贴板");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

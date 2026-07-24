@@ -46,6 +46,10 @@ export async function revealSound(path: string) {
   await invoke<void>("reveal_in_file_manager", { path });
 }
 
+export async function copySoundToClipboard(path: string) {
+  await invoke<void>("copy_sound_to_clipboard", { path });
+}
+
 export async function getWaveform(path: string, bins = 220) {
   return invoke<number[]>("get_waveform", { path, bins });
 }

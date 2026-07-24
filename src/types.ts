@@ -1,13 +1,4 @@
-export type Category =
-  | "环境 Ambience"
-  | "拟音 Foley"
-  | "硬音效 Hard FX"
-  | "界面 UI"
-  | "生物 Creature"
-  | "交通 Vehicles"
-  | "武器 Weapons"
-  | "设计音 Design"
-  | "未分类";
+export type Category = string;
 
 export type Sound = {
   path: string;
